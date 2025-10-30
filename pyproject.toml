@@ -11,6 +11,9 @@ dependencies = [
     "mcp==1.18.0",
     "pyspark==4.0.0",
     "delta-spark==4.0.0",
+    "pandas>=2.0.0",  # Required by PySpark
+    "pyarrow>=10.0.0",  # Required for Spark Connect and Delta Lake
+    "numpy>=1.20.0",  # Required by pandas
     "aiohttp==3.13.1",
     "cacheout==0.16.0",
     "minio==7.2.18",
