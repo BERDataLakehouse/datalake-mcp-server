@@ -196,14 +196,34 @@ def get_spark_session(
         )
 
     # Build user-specific settings with dynamic Spark Connect URL and MinIO credentials
-    user_settings = BERDLSettings(
-        **{
-            **settings.model_dump(),
-            "USER": username,
-            "SPARK_CONNECT_URL": AnyUrl(spark_connect_url),
-            "MINIO_ACCESS_KEY": minio_access_key,
-            "MINIO_SECRET_KEY": minio_secret_key,
-        }
+    # We need to import the notebook's BERDLSettings since get_spark_session expects it
+    from berdl_notebook_utils.berdl_settings import BERDLSettings as NotebookSettings
+    
+    # Convert MCP settings to notebook settings format with user-specific overrides
+    user_settings = NotebookSettings(
+        # User-specific overrides
+        USER=username,
+        SPARK_CONNECT_URL=spark_connect_url,
+        MINIO_ACCESS_KEY=minio_access_key,
+        MINIO_SECRET_KEY=minio_secret_key,
+        # Required fields from MCP settings
+        KBASE_AUTH_TOKEN=os.getenv("KBASE_AUTH_TOKEN", ""),  # Will be set by notebook
+        CDM_TASK_SERVICE_URL=os.getenv("CDM_TASK_SERVICE_URL", "http://localhost:8000"),
+        BERDL_POD_IP=os.getenv("BERDL_POD_IP", "127.0.0.1"),
+        SPARK_MASTER_URL=str(settings.SPARK_MASTER_URL) if settings.SPARK_MASTER_URL else "spark://localhost:7077",
+        SPARK_CLUSTER_MANAGER_API_URL=os.getenv("SPARK_CLUSTER_MANAGER_API_URL", "http://localhost:8000"),
+        DATALAKE_MCP_SERVER_URL=os.getenv("DATALAKE_MCP_SERVER_URL", "http://localhost:8000"),
+        # Shared fields from MCP settings
+        MINIO_ENDPOINT_URL=settings.MINIO_ENDPOINT_URL,
+        MINIO_SECURE=settings.MINIO_SECURE,
+        SPARK_HOME=settings.SPARK_HOME,
+        BERDL_HIVE_METASTORE_URI=str(settings.BERDL_HIVE_METASTORE_URI),
+        SPARK_WORKER_COUNT=settings.SPARK_WORKER_COUNT,
+        SPARK_WORKER_CORES=settings.SPARK_WORKER_CORES,
+        SPARK_WORKER_MEMORY=settings.SPARK_WORKER_MEMORY,
+        SPARK_MASTER_CORES=settings.SPARK_MASTER_CORES,
+        SPARK_MASTER_MEMORY=settings.SPARK_MASTER_MEMORY,
+        GOVERNANCE_API_URL=str(settings.GOVERNANCE_API_URL),
     )
 
     try:
