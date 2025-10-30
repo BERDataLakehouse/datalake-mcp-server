@@ -20,10 +20,14 @@ from pyspark.sql import SparkSession
 from src.settings import BERDLSettings
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
-warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="google.protobuf.runtime_version"
+)
 
 # Suppress CANNOT_MODIFY_CONFIG warnings for Hive metastore settings in Spark Connect
-warnings.filterwarnings("ignore", category=UserWarning, module="pyspark.sql.connect.conf")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="pyspark.sql.connect.conf"
+)
 
 # =============================================================================
 # CONSTANTS
@@ -34,7 +38,9 @@ SPARK_DEFAULT_POOL = "default"
 SPARK_POOLS = [SPARK_DEFAULT_POOL, "highPriority"]
 
 # Memory overhead percentages for Spark components
-EXECUTOR_MEMORY_OVERHEAD = 0.1  # 10% overhead for executors (accounts for JVM + system overhead)
+EXECUTOR_MEMORY_OVERHEAD = (
+    0.1  # 10% overhead for executors (accounts for JVM + system overhead)
+)
 DRIVER_MEMORY_OVERHEAD = 0.05  # 5% overhead for driver (typically less memory pressure)
 
 # =============================================================================
@@ -78,7 +84,9 @@ def convert_memory_format(memory_str: str, overhead_percentage: float = 0.1) -> 
     }
 
     # Remove trailing 'b' if present for lookup
-    unit_key = unit_lower.rstrip("b") + "b" if unit_lower.endswith("b") else unit_lower + "b"
+    unit_key = (
+        unit_lower.rstrip("b") + "b" if unit_lower.endswith("b") else unit_lower + "b"
+    )
     if unit_key not in multipliers:
         unit_key = unit_lower
 
@@ -116,8 +124,12 @@ def _get_executor_config(settings: BERDLSettings) -> dict[str, str]:
         Dictionary of Spark executor and driver configuration
     """
     # Convert memory formats from profile to Spark format with overhead adjustment
-    executor_memory = convert_memory_format(settings.SPARK_WORKER_MEMORY, EXECUTOR_MEMORY_OVERHEAD)
-    driver_memory = convert_memory_format(settings.SPARK_MASTER_MEMORY, DRIVER_MEMORY_OVERHEAD)
+    executor_memory = convert_memory_format(
+        settings.SPARK_WORKER_MEMORY, EXECUTOR_MEMORY_OVERHEAD
+    )
+    driver_memory = convert_memory_format(
+        settings.SPARK_MASTER_MEMORY, DRIVER_MEMORY_OVERHEAD
+    )
 
     config = {
         # Driver configuration (critical for remote cluster connections)
@@ -172,7 +184,9 @@ def _get_s3_conf(settings: BERDLSettings) -> dict[str, str]:
         "spark.hadoop.fs.s3a.endpoint": settings.MINIO_ENDPOINT_URL,
         "spark.hadoop.fs.s3a.access.key": settings.MINIO_ACCESS_KEY,
         "spark.hadoop.fs.s3a.secret.key": settings.MINIO_SECRET_KEY,
-        "spark.hadoop.fs.s3a.connection.ssl.enabled": str(settings.MINIO_SECURE).lower(),
+        "spark.hadoop.fs.s3a.connection.ssl.enabled": str(
+            settings.MINIO_SECURE
+        ).lower(),
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
         "spark.sql.warehouse.dir": warehouse_dir,
@@ -293,4 +307,3 @@ def get_spark_session(
     spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
 
     return spark
-

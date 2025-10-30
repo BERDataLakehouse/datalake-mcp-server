@@ -15,6 +15,7 @@ from pyspark.sql import SparkSession
 
 # Use local MCP copies that don't rely on environment variables
 from src.delta_lake import hive_metastore
+
 # Use shared utilities from berdl_notebook_utils for consistency with notebooks
 from berdl_notebook_utils.spark import data_store as notebook_data_store
 
@@ -32,11 +33,14 @@ def _execute_with_spark(
     func: Any, spark: Optional[SparkSession] = None, *args, **kwargs
 ) -> Any:
     """
-    Execute a function with a SparkSession, creating one if not provided.
+    Execute a function with a SparkSession.
+
+    In the MCP server context, spark must be provided via FastAPI dependency injection.
     """
     if spark is None:
-        with get_spark_session() as spark:
-            return func(spark, *args, **kwargs)
+        raise ValueError(
+            "SparkSession must be provided. In MCP server context, use FastAPI dependency injection."
+        )
     return func(spark, *args, **kwargs)
 
 
@@ -151,7 +155,7 @@ def get_databases(
 
     Returns:
         List of database names, either as JSON string or raw list
-        
+
     Raises:
         ValueError: If filter_by_namespace is True but auth_token is not provided
         ValueError: If use_hms is True but settings is not provided
@@ -203,6 +207,7 @@ def get_db_structure(
     with_schema: bool = False,
     use_hms: bool = True,
     return_json: bool = True,
+    settings: Optional[BERDLSettings] = None,
 ) -> Union[str, Dict]:
     """Get the structure of all databases in the Hive metastore.
 
@@ -211,6 +216,7 @@ def get_db_structure(
         with_schema: Whether to include table schemas
         use_hms: Whether to use Hive Metastore client for metadata retrieval
         return_json: Whether to return the result as a JSON string
+        settings: BERDLSettings instance (required if use_hms is True)
 
     Returns:
         Database structure as either JSON string or dictionary:
@@ -248,10 +254,11 @@ def get_db_structure(
             tables = hive_metastore.get_tables(database=db, settings=settings)
             if with_schema and isinstance(tables, list):
                 if spark is None:
-                    with get_spark_session() as spark:
-                        db_structure[db] = _get_tables_with_schemas(db, tables, spark)
-                else:
-                    db_structure[db] = _get_tables_with_schemas(db, tables, spark)
+                    raise ValueError(
+                        "SparkSession must be provided for schema retrieval. "
+                        "In MCP server context, use FastAPI dependency injection."
+                    )
+                db_structure[db] = _get_tables_with_schemas(db, tables, spark)
             else:
                 db_structure[db] = tables
 

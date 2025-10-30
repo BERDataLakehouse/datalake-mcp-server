@@ -21,37 +21,39 @@ from src.settings import BERDLSettings
 def get_hive_metastore_client(settings: BERDLSettings) -> HMSClient:
     """
     Get Hive Metastore client configured from settings.
-    
+
     Args:
         settings: BERDLSettings instance with HMS configuration
-        
+
     Returns:
         Configured HMSClient instance
     """
     # Parse the HMS URI to extract host and port
     # Format: thrift://host:port
     hms_uri = str(settings.BERDL_HIVE_METASTORE_URI)
-    
+
     if not hms_uri.startswith("thrift://"):
-        raise ValueError(f"Invalid HMS URI format: {hms_uri}. Expected thrift://host:port")
-    
+        raise ValueError(
+            f"Invalid HMS URI format: {hms_uri}. Expected thrift://host:port"
+        )
+
     # Remove the thrift:// prefix and split host:port
     host_port = hms_uri.replace("thrift://", "")
-    
+
     if ":" in host_port:
         host, port_str = host_port.split(":", 1)
         port = int(port_str)
     else:
         host = host_port
         port = 9083  # Default HMS port
-    
+
     return HMSClient(host=host, port=port)
 
 
 def get_databases(settings: BERDLSettings) -> List[str]:
     """
     Get list of databases from Hive metastore.
-    
+
     Args:
         settings: BERDLSettings instance with HMS configuration
 
@@ -89,4 +91,3 @@ def get_tables(database: str, settings: BERDLSettings) -> List[str]:
         raise e
     finally:
         client.close()
-

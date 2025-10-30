@@ -216,16 +216,20 @@ def get_spark_session(
     )
 
     try:
-        logger.info(f"Connecting to Spark Connect server for user {username} at {spark_connect_url}")
-        
+        logger.info(
+            f"Connecting to Spark Connect server for user {username} at {spark_connect_url}"
+        )
+
         spark = _get_spark_session(
             app_name=f"datalake_mcp_server_{username}",
             settings=user_settings,
         )
-        
-        logger.info(f"Successfully connected to Spark Connect server for user {username}")
+
+        logger.info(
+            f"Successfully connected to Spark Connect server for user {username}"
+        )
         return spark
-        
+
     except Exception as e:
         logger.error(
             f"Failed to connect to Spark Connect server for user {username}: {e}"
