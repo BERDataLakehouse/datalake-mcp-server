@@ -6,5 +6,3 @@ def test_health_check(client):
     response = client.get("/apis/mcp/health")
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
-
-

@@ -153,7 +153,7 @@ def _get_from_cache(
                 if first_row and "value" in first_row:
                     return json.loads(first_row["value"])
 
-    except Exception as e:
+    except Exception:
         # Log Redis connection errors but don't fail the operation
         logger.exception(
             f"Redis connection error for key {cache_key} in namespace {namespace}"
@@ -193,7 +193,7 @@ def _store_in_cache(
         logger.debug(
             f"Cached data under key {cache_key} in table {table_name} with TTL {ttl}s"
         )
-    except Exception as e:
+    except Exception:
         # Log the error but don't fail the operation if caching fails
         logger.exception(
             f"Failed to cache data under key {cache_key} in namespace {namespace}"

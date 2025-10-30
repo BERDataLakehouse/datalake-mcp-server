@@ -1,6 +1,5 @@
 """Tests for the delta routes module."""
 
-
 from src.routes import delta
 
 

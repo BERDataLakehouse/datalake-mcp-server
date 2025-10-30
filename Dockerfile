@@ -6,6 +6,8 @@ USER root
 RUN apt-get update && apt-get install -y \
     # required for psycopg
     libpq-dev gcc \
+    # required for git dependencies (berdl-notebook-utils)
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 ENV SPARK_JARS_DIR=/opt/bitnami/spark/jars

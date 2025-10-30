@@ -12,7 +12,10 @@ from fastapi import Depends, Request
 from pydantic import AnyUrl
 from pyspark.sql import SparkSession
 
-from src.delta_lake.spark_utils import get_spark_session as _get_spark_session
+# Use shared Spark utilities from berdl_notebook_utils
+from berdl_notebook_utils.setup_spark_session import (
+    get_spark_session as _get_spark_session,
+)
 from src.service import app_state
 from src.service.http_bearer import KBaseHTTPBearer
 from src.settings import BERDLSettings, get_settings
@@ -30,51 +33,49 @@ SPARK_CONNECT_PORT = "15002"
 def read_user_minio_credentials(username: str) -> tuple[str, str]:
     """
     Read user's MinIO credentials from their home directory.
-    
+
     Each user has a .berdl_minio_credentials file in their home directory with format:
     {"username": "user", "access_key": "key", "secret_key": "secret"}
-    
+
     Args:
         username: KBase username
-        
+
     Returns:
         Tuple of (access_key, secret_key)
-        
+
     Raises:
         FileNotFoundError: If credentials file doesn't exist
         ValueError: If credentials file is malformed
     """
     # Construct path to credentials file
     creds_path = Path(f"/home/{username}/.berdl_minio_credentials")
-    
+
     logger.debug(f"Reading MinIO credentials from: {creds_path}")
-    
+
     if not creds_path.exists():
         raise FileNotFoundError(
             f"MinIO credentials file not found at {creds_path}. "
             f"User {username} must have .berdl_minio_credentials in their home directory."
         )
-    
+
     try:
-        with open(creds_path, 'r') as f:
+        with open(creds_path, "r") as f:
             creds = json.load(f)
-        
+
         access_key = creds.get("access_key")
         secret_key = creds.get("secret_key")
-        
+
         if not access_key or not secret_key:
             raise ValueError(
                 f"Invalid credentials format in {creds_path}. "
-                f"Expected: {{\"username\": \"user\", \"access_key\": \"key\", \"secret_key\": \"secret\"}}"
+                f'Expected: {{"username": "user", "access_key": "key", "secret_key": "secret"}}'
             )
-        
+
         logger.info(f"Successfully loaded MinIO credentials for user: {username}")
         return access_key, secret_key
-        
+
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Failed to parse MinIO credentials file {creds_path}: {e}"
-        )
+        raise ValueError(f"Failed to parse MinIO credentials file {creds_path}: {e}")
     except Exception as e:
         logger.error(f"Error reading MinIO credentials for {username}: {e}")
         raise
@@ -186,7 +187,10 @@ def get_spark_session(
             f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
         )
     except Exception as e:
-        logger.error(f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}", exc_info=True)
+        logger.error(
+            f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
         raise Exception(
             f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
         )
@@ -210,7 +214,9 @@ def get_spark_session(
             settings=user_settings,
         )
     except Exception as e:
-        logger.error(f"Failed to connect to Spark Connect server for user {username}: {e}")
+        logger.error(
+            f"Failed to connect to Spark Connect server for user {username}: {e}"
+        )
         raise Exception(
             f"Unable to connect to Spark session for user {username}. "
             f"Please ensure you are logged into BERDL JupyterHub and your notebook is running. "

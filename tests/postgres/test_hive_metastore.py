@@ -1,6 +1,5 @@
 """Tests for the hive metastore module."""
 
-
 from src.postgres import hive_metastore
 
 

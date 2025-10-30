@@ -24,9 +24,18 @@ class HealthResponse(BaseModel):
 class DatabaseListRequest(BaseModel):
     """Request model for listing databases."""
 
-    use_postgres: Annotated[
+    use_hms: Annotated[
         bool,
-        Field(description="Whether to use PostgreSQL for faster metadata retrieval"),
+        Field(
+            description="Whether to use Hive Metastore client for faster metadata retrieval"
+        ),
+    ] = True
+
+    filter_by_namespace: Annotated[
+        bool,
+        Field(
+            description="Whether to filter databases by user/tenant namespace prefixes"
+        ),
     ] = True
 
 
@@ -42,9 +51,11 @@ class TableListRequest(BaseModel):
     database: Annotated[
         str, Field(description="Name of the database to list tables from")
     ]
-    use_postgres: Annotated[
+    use_hms: Annotated[
         bool,
-        Field(description="Whether to use PostgreSQL for faster metadata retrieval"),
+        Field(
+            description="Whether to use Hive Metastore client for faster metadata retrieval"
+        ),
     ] = True
 
 
@@ -79,9 +90,11 @@ class DatabaseStructureRequest(BaseModel):
     with_schema: Annotated[
         bool, Field(description="Whether to include table schemas in the response")
     ] = False
-    use_postgres: Annotated[
+    use_hms: Annotated[
         bool,
-        Field(description="Whether to use PostgreSQL for faster metadata retrieval"),
+        Field(
+            description="Whether to use Hive Metastore client for faster metadata retrieval"
+        ),
     ] = True
 
 
