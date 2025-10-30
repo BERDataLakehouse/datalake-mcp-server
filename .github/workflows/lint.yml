@@ -20,13 +20,10 @@ jobs:
       run: uv python install ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
-        cd notebook_utils
         uv sync --inexact --group dev
     - name: Run linting
       run: |
-        cd notebook_utils
-        uv run ruff check ..
+        uv run ruff check .
     - name: Check formatting
       run: |
-        cd notebook_utils
-        uv run ruff format --check ..
+        uv run ruff format --check .
