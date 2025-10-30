@@ -12,10 +12,9 @@ from fastapi import Depends, Request
 from pydantic import AnyUrl
 from pyspark.sql import SparkSession
 
-# Use shared Spark utilities from berdl_notebook_utils
-from berdl_notebook_utils.setup_spark_session import (
-    get_spark_session as _get_spark_session,
-)
+# Use MCP server's local copy of spark session utilities
+# (copied from berdl_notebook_utils but adapted for shared multi-user service)
+from src.delta_lake.setup_spark_session import get_spark_session as _get_spark_session
 from src.service import app_state
 from src.service.http_bearer import KBaseHTTPBearer
 from src.settings import BERDLSettings, get_settings
@@ -195,8 +194,8 @@ def get_spark_session(
             f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
         )
 
-    # Build user-specific settings with dynamic Spark Connect URL and MinIO credentials
-    # Use MCP server's BERDLSettings (compatible with notebook's get_spark_session)
+    # Build user-specific settings for Spark session
+    # This uses MCP server's BERDLSettings which has sensible defaults
     user_settings = BERDLSettings(
         USER=username,
         SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
@@ -217,12 +216,16 @@ def get_spark_session(
     )
 
     try:
-        return _get_spark_session(
+        logger.info(f"Connecting to Spark Connect server for user {username} at {spark_connect_url}")
+        
+        spark = _get_spark_session(
             app_name=f"datalake_mcp_server_{username}",
-            use_spark_connect=True,  # Connect to user's Spark Connect server
-            scheduler_pool=str(os.getenv("SPARK_POOL", DEFAULT_SPARK_POOL)),
             settings=user_settings,
         )
+        
+        logger.info(f"Successfully connected to Spark Connect server for user {username}")
+        return spark
+        
     except Exception as e:
         logger.error(
             f"Failed to connect to Spark Connect server for user {username}: {e}"

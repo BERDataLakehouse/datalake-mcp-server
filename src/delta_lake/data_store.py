@@ -13,13 +13,12 @@ from typing import Any, Dict, List, Optional, Union
 import httpx
 from pyspark.sql import SparkSession
 
+# Use local MCP copies that don't rely on environment variables
+from src.delta_lake import hive_metastore
 # Use shared utilities from berdl_notebook_utils for consistency with notebooks
-from berdl_notebook_utils import hive_metastore
 from berdl_notebook_utils.spark import data_store as notebook_data_store
 
-# Use shared Spark utilities from berdl_notebook_utils
-from berdl_notebook_utils.setup_spark_session import get_spark_session
-from src.settings import get_settings
+from src.settings import BERDLSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +136,7 @@ def get_databases(
     return_json: bool = True,
     filter_by_namespace: bool = False,
     auth_token: Optional[str] = None,
+    settings: Optional[BERDLSettings] = None,
 ) -> Union[str, List[str]]:
     """
     Get the list of databases in the Hive metastore.
@@ -147,19 +147,23 @@ def get_databases(
         return_json: Whether to return JSON string or raw data
         filter_by_namespace: Whether to filter databases by user/tenant namespace prefixes
         auth_token: KBase auth token (required if filter_by_namespace is True)
+        settings: BERDLSettings instance (required if use_hms is True)
 
     Returns:
         List of database names, either as JSON string or raw list
-
+        
     Raises:
         ValueError: If filter_by_namespace is True but auth_token is not provided
+        ValueError: If use_hms is True but settings is not provided
     """
 
     def _get_dbs(session: SparkSession) -> List[str]:
         return [db.name for db in session.catalog.listDatabases()]
 
     if use_hms:
-        databases = hive_metastore.get_databases()
+        if settings is None:
+            settings = get_settings()
+        databases = hive_metastore.get_databases(settings=settings)
     else:
         databases = _execute_with_spark(_get_dbs, spark)
 
@@ -235,11 +239,13 @@ def get_db_structure(
         return db_structure
 
     if use_hms:
+        if settings is None:
+            settings = get_settings()
         db_structure = {}
-        databases = hive_metastore.get_databases()
+        databases = hive_metastore.get_databases(settings=settings)
 
         for db in databases:
-            tables = hive_metastore.get_tables(db)
+            tables = hive_metastore.get_tables(database=db, settings=settings)
             if with_schema and isinstance(tables, list):
                 if spark is None:
                     with get_spark_session() as spark:
