@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request, status
 
 from src.delta_lake import data_store, delta_service
 from src.service.dependencies import auth, get_spark_session
+from src.settings import get_settings
 from src.service.models import (
     DatabaseListRequest,
     DatabaseListResponse,
@@ -93,6 +94,7 @@ def list_database_tables(
     """
     Endpoint to list tables in a specific database.
     """
+    settings = get_settings()
     tables = cast(
         list[str],
         data_store.get_tables(
@@ -100,6 +102,7 @@ def list_database_tables(
             spark=spark,
             use_hms=request.use_hms,
             return_json=False,
+            settings=settings,
         ),
     )
     return TableListResponse(tables=tables)
@@ -149,7 +152,7 @@ def get_database_structure(
     """
     Endpoint to get the complete structure of all databases.
     """
-
+    settings = get_settings()
     structure = cast(
         dict[str, list[str] | dict[str, list[str]]],
         data_store.get_db_structure(
@@ -157,6 +160,7 @@ def get_database_structure(
             with_schema=request.with_schema,
             use_hms=request.use_hms,
             return_json=False,
+            settings=settings,
         ),
     )
     return DatabaseStructureResponse(structure=structure)

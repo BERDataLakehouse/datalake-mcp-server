@@ -23,10 +23,10 @@ from src.settings import BERDLSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
-# Re-export functions from berdl_notebook_utils that don't need auth customization
-# These work identically in both notebook and MCP server contexts
-get_tables = notebook_data_store.get_tables
+# Re-export get_table_schema from berdl_notebook_utils (works identically in both contexts)
 get_table_schema = notebook_data_store.get_table_schema
+
+# get_tables is customized below to support use_hms parameter with settings
 
 
 def _execute_with_spark(
@@ -199,7 +199,38 @@ def get_databases(
     return _format_output(databases, return_json)
 
 
-# get_tables and get_table_schema are imported from berdl_notebook_utils above
+def get_tables(
+    database: str,
+    spark: Optional[SparkSession] = None,
+    use_hms: bool = True,
+    return_json: bool = True,
+    settings: Optional[BERDLSettings] = None,
+) -> Union[str, List[str]]:
+    """
+    Get the list of tables in a database.
+
+    Args:
+        database: Name of the database
+        spark: Optional SparkSession to use (if use_hms is False)
+        use_hms: Whether to use Hive Metastore client direct query (faster) or Spark
+        return_json: Whether to return JSON string or raw data
+        settings: BERDLSettings instance (required if use_hms is True)
+
+    Returns:
+        List of table names, either as JSON string or raw list
+    """
+
+    def _get_tbls(session: SparkSession) -> List[str]:
+        return [t.name for t in session.catalog.listTables(database)]
+
+    if use_hms:
+        if settings is None:
+            settings = get_settings()
+        tables = hive_metastore.get_tables(database=database, settings=settings)
+    else:
+        tables = _execute_with_spark(_get_tbls, spark)
+
+    return _format_output(tables, return_json)
 
 
 def get_db_structure(
@@ -272,11 +303,16 @@ def database_exists(
     database: str,
     spark: Optional[SparkSession] = None,
     use_hms: bool = True,
+    settings: Optional[BERDLSettings] = None,
 ) -> bool:
     """
     Check if a database exists in the Hive metastore.
     """
-    return database in get_databases(spark=spark, use_hms=use_hms, return_json=False)
+    if settings is None:
+        settings = get_settings()
+    return database in get_databases(
+        spark=spark, use_hms=use_hms, return_json=False, settings=settings
+    )
 
 
 def table_exists(
@@ -284,13 +320,17 @@ def table_exists(
     table: str,
     spark: Optional[SparkSession] = None,
     use_hms: bool = True,
+    settings: Optional[BERDLSettings] = None,
 ) -> bool:
     """
     Check if a table exists in a database.
     """
+    if settings is None:
+        settings = get_settings()
     return table in get_tables(
         database=database,
         spark=spark,
         use_hms=use_hms,
         return_json=False,
+        settings=settings,
     )
