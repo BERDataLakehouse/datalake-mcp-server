@@ -27,3 +27,6 @@ jobs:
     - name: Check formatting
       run: |
         uv run ruff format --check .
+    - name: Run tests
+      run: |
+        uv run pytest tests/ -v --cov=src --cov-report=term-missing
