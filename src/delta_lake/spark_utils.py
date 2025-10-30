@@ -1,214 +1,346 @@
 """
-Spark utilities for the Delta Lake service.
+Spark utilities for the Delta Lake MCP service.
+
+This module provides utilities for creating and configuring Spark sessions
+with support for Delta Lake, MinIO S3 storage, and Spark Connect mode.
+
+Compatible with the BERDL spark_notebook environment.
 """
 
-## Copied from https://github.com/kbase/cdm-jupyterhub/blob/main/src/spark/utils.py
-
-import os
-import socket
+import warnings
 from datetime import datetime
-from typing import Dict, List, Optional
-from urllib.parse import urlparse
 
 from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
 
-from src.service.arg_checkers import not_falsy
+from src.settings import BERDLSettings, get_settings
 
-# the default number of CPU cores that each Spark executor will use
-# If not specified, Spark will typically use all available cores on the worker nodes
-DEFAULT_EXECUTOR_CORES = 1
-# Available Spark fair scheduler pools are defined in /config/spark-fairscheduler.xml
+# Suppress Protobuf version warnings from PySpark Spark Connect
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
+
+# Suppress CANNOT_MODIFY_CONFIG warnings for Hive metastore settings in Spark Connect
+warnings.filterwarnings("ignore", category=UserWarning, module="pyspark.sql.connect.conf")
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# Fair scheduler configuration
 SPARK_DEFAULT_POOL = "default"
 SPARK_POOLS = [SPARK_DEFAULT_POOL, "highPriority"]
-DEFAULT_MAX_EXECUTORS = 5
+
+# Memory overhead percentages for Spark components
+EXECUTOR_MEMORY_OVERHEAD = 0.1  # 10% overhead for executors (accounts for JVM + system overhead)
+DRIVER_MEMORY_OVERHEAD = 0.05  # 5% overhead for driver (typically less memory pressure)
+
+# =============================================================================
+# PRIVATE HELPER FUNCTIONS
+# =============================================================================
 
 
-def _get_jars(jar_names: List[str]) -> str:
+def convert_memory_format(memory_str: str, overhead_percentage: float = 0.1) -> str:
     """
-    Helper function to get the required JAR files as a comma-separated string.
+    Convert memory format from profile format to Spark format with overhead adjustment.
 
-    :param jar_names: List of JAR file names
+    Args:
+        memory_str: Memory string in profile format (supports B, KiB, MiB, GiB, TiB)
+        overhead_percentage: Percentage of memory to reserve for system overhead (default: 0.1 = 10%)
 
-    :return: A comma-separated string of JAR file paths
+    Returns:
+        Memory string in Spark format with overhead accounted for
     """
-    jar_dir = not_falsy(os.getenv("SPARK_JARS_DIR"), "SPARK_JARS_DIR")
-    jars = [os.path.join(jar_dir, jar) for jar in jar_names]
+    import re
 
-    missing_jars = [jar for jar in jars if not os.path.exists(jar)]
-    if missing_jars:
-        raise FileNotFoundError(f"Some required jars are not found: {missing_jars}")
+    # Extract number and unit from memory string
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgtKMGT]i?[bB]?)$", memory_str)
+    if not match:
+        raise ValueError(f"Invalid memory format: {memory_str}")
 
-    return ", ".join(jars)
+    value, unit = match.groups()
+    value = float(value)
+
+    # Convert to bytes for calculation
+    unit_lower = unit.lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1024,
+        "kib": 1024,
+        "mb": 1024**2,
+        "mib": 1024**2,
+        "gb": 1024**3,
+        "gib": 1024**3,
+        "tb": 1024**4,
+        "tib": 1024**4,
+    }
+
+    # Remove trailing 'b' if present for lookup
+    unit_key = unit_lower.rstrip("b") + "b" if unit_lower.endswith("b") else unit_lower + "b"
+    if unit_key not in multipliers:
+        unit_key = unit_lower
+
+    bytes_value = value * multipliers.get(unit_key, multipliers["b"])
+
+    # Apply overhead reduction (reserve percentage for system)
+    adjusted_bytes = bytes_value * (1 - overhead_percentage)
+
+    # Convert back to appropriate Spark unit (prefer GiB for larger values)
+    if adjusted_bytes >= 1024**3:
+        adjusted_value = adjusted_bytes / (1024**3)
+        spark_unit = "g"
+    elif adjusted_bytes >= 1024**2:
+        adjusted_value = adjusted_bytes / (1024**2)
+        spark_unit = "m"
+    elif adjusted_bytes >= 1024:
+        adjusted_value = adjusted_bytes / 1024
+        spark_unit = "k"
+    else:
+        adjusted_value = adjusted_bytes
+        spark_unit = ""
+
+    # Format as integer to ensure Spark compatibility
+    return f"{int(round(adjusted_value))}{spark_unit}"
 
 
-def _get_s3_conf() -> Dict[str, str]:
+def _get_executor_config(settings: BERDLSettings) -> dict[str, str]:
     """
-    Helper function to get S3 configuration for MinIO.
+    Get Spark executor and driver configuration based on profile settings.
+
+    Args:
+        settings: BERDLSettings instance with profile-specific configuration
+
+    Returns:
+        Dictionary of Spark executor and driver configuration
     """
-    minio_url = not_falsy(os.environ.get("MINIO_URL"), "MINIO_URL")
-    minio_access_key = not_falsy(os.environ.get("MINIO_ACCESS_KEY"), "MINIO_ACCESS_KEY")
-    minio_secret_key = not_falsy(os.environ.get("MINIO_SECRET_KEY"), "MINIO_SECRET_KEY")
+    # Convert memory formats from profile to Spark format with overhead adjustment
+    executor_memory = convert_memory_format(settings.SPARK_WORKER_MEMORY, EXECUTOR_MEMORY_OVERHEAD)
+    driver_memory = convert_memory_format(settings.SPARK_MASTER_MEMORY, DRIVER_MEMORY_OVERHEAD)
 
-    if not all([minio_url, minio_access_key, minio_secret_key]):
-        raise EnvironmentError("Missing required MinIO environment variables")
+    config = {
+        # Driver configuration (critical for remote cluster connections)
+        "spark.driver.memory": driver_memory,
+        "spark.driver.cores": str(settings.SPARK_MASTER_CORES),
+        # Executor configuration
+        "spark.executor.instances": str(settings.SPARK_WORKER_COUNT),
+        "spark.executor.cores": str(settings.SPARK_WORKER_CORES),
+        "spark.executor.memory": executor_memory,
+        # Disable dynamic allocation since we're setting explicit instances
+        "spark.dynamicAllocation.enabled": "false",
+        "spark.dynamicAllocation.shuffleTracking.enabled": "false",
+    }
 
+    return config
+
+
+def _get_spark_defaults_conf() -> dict[str, str]:
+    """
+    Get Spark defaults configuration.
+    """
     return {
-        "spark.hadoop.fs.s3a.endpoint": minio_url,
-        "spark.hadoop.fs.s3a.access.key": minio_access_key,
-        "spark.hadoop.fs.s3a.secret.key": minio_secret_key,
-        "spark.hadoop.fs.s3a.path.style.access": "true",
-        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        # Decommissioning
+        "spark.decommission.enabled": "true",
+        "spark.storage.decommission.rddBlocks.enabled": "true",
+        # Broadcast join configurations
+        "spark.sql.autoBroadcastJoinThreshold": "52428800",  # 50MB (default is 10MB)
+        # Shuffle and compression configurations
+        "spark.reducer.maxSizeInFlight": "96m",  # 96MB (default is 48MB)
+        "spark.shuffle.file.buffer": "1m",  # 1MB (default is 32KB)
+        # Delta Lake optimizations
+        "spark.databricks.delta.optimizeWrite.enabled": "true",
+        "spark.databricks.delta.autoCompact.enabled": "true",
     }
 
 
-def _get_delta_lake_conf() -> Dict[str, str]:
+def _get_s3_conf(settings: BERDLSettings) -> dict[str, str]:
     """
-    Helper function to get Delta Lake specific Spark configuration.
+    Get S3 configuration for MinIO.
 
-    :return: A dictionary of Delta Lake specific Spark configuration
+    Args:
+        settings: BERDLSettings instance with configuration
 
-    reference: https://blog.min.io/delta-lake-minio-multi-cloud/
+    Returns:
+        Dictionary of S3/MinIO Spark configuration properties
     """
+    # Use user's SQL warehouse
+    warehouse_dir = f"s3a://cdm-lake/users-sql-warehouse/{settings.USER}/"
+    event_log_dir = f"s3a://cdm-spark-job-logs/spark-job-logs/{settings.USER}/"
 
-    return {
+    config = {
+        "spark.hadoop.fs.s3a.endpoint": settings.MINIO_ENDPOINT_URL,
+        "spark.hadoop.fs.s3a.access.key": settings.MINIO_ACCESS_KEY,
+        "spark.hadoop.fs.s3a.secret.key": settings.MINIO_SECRET_KEY,
+        "spark.hadoop.fs.s3a.connection.ssl.enabled": str(settings.MINIO_SECURE).lower(),
+        "spark.hadoop.fs.s3a.path.style.access": "true",
+        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "spark.sql.warehouse.dir": warehouse_dir,
+        "spark.eventLog.enabled": "true",
+        "spark.eventLog.dir": event_log_dir,
         "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         "spark.databricks.delta.retentionDurationCheck.enabled": "false",
-        "spark.sql.catalogImplementation": "hive",
     }
 
+    return config
 
-def _validate_env_vars(required_vars: List[str], context: str) -> None:
-    """Validate required environment variables."""
-    missing = [var for var in required_vars if var not in os.environ]
-    if missing:
-        raise EnvironmentError(
-            f"Missing required environment variables for {context}: {missing}"
+
+def _filter_immutable_spark_connect_configs(config: dict[str, str]) -> dict[str, str]:
+    """
+    Filter out configurations that cannot be modified in Spark Connect mode.
+
+    These configs must be set server-side when the Spark Connect server starts.
+    Attempting to set them from the client results in CANNOT_MODIFY_CONFIG warnings.
+
+    Args:
+        config: Dictionary of Spark configurations
+
+    Returns:
+        Filtered configuration dictionary with only mutable configs
+    """
+    immutable_configs = {
+        # Cluster-level settings (must be set at master startup)
+        "spark.decommission.enabled",
+        "spark.storage.decommission.rddBlocks.enabled",
+        "spark.reducer.maxSizeInFlight",
+        "spark.shuffle.file.buffer",
+        # Driver and executor resource configs (locked at server startup)
+        "spark.driver.memory",
+        "spark.driver.cores",
+        "spark.executor.instances",
+        "spark.executor.cores",
+        "spark.executor.memory",
+        "spark.dynamicAllocation.enabled",
+        "spark.dynamicAllocation.shuffleTracking.enabled",
+        # Event logging (locked at server startup)
+        "spark.eventLog.enabled",
+        "spark.eventLog.dir",
+        # SQL extensions (must be loaded at startup)
+        "spark.sql.extensions",
+        "spark.sql.catalog.spark_catalog",
+        # Hive catalog (locked at startup)
+        "spark.sql.catalogImplementation",
+        # Warehouse directory (locked at server startup)
+        "spark.sql.warehouse.dir",
+    }
+
+    return {k: v for k, v in config.items() if k not in immutable_configs}
+
+
+def _set_scheduler_pool(spark: SparkSession, scheduler_pool: str) -> None:
+    """Set the scheduler pool for the Spark session."""
+    if scheduler_pool not in SPARK_POOLS:
+        print(
+            f"Warning: Scheduler pool '{scheduler_pool}' not in available pools: {SPARK_POOLS}. "
+            f"Defaulting to '{SPARK_DEFAULT_POOL}'"
         )
+        scheduler_pool = SPARK_DEFAULT_POOL
+
+    spark.sparkContext.setLocalProperty("spark.scheduler.pool", scheduler_pool)
+
+
+# =============================================================================
+# PUBLIC FUNCTIONS
+# =============================================================================
 
 
 def get_spark_session(
-    app_name: Optional[str] = None,
+    app_name: str | None = None,
     local: bool = False,
-    yarn: bool = True,
     delta_lake: bool = True,
-    executor_cores: int = DEFAULT_EXECUTOR_CORES,
     scheduler_pool: str = SPARK_DEFAULT_POOL,
+    use_hive: bool = True,
+    settings: BERDLSettings | None = None,
+    use_spark_connect: bool = True,
 ) -> SparkSession:
     """
-    Helper to get and manage the SparkSession and keep all of our spark configuration params in one place.
+    Create and configure a Spark session with BERDL-specific settings.
 
-    :param app_name: The name of the application. If not provided, a default name will be generated.
-    :param local: Whether to run the spark session locally or not. Default is False.
-    :param yarn: Whether to run the spark session on YARN or not. Default is True.
-    :param delta_lake: Build the spark session with Delta Lake support. Default is True.
-    :param executor_cores: The number of CPU cores that each Spark executor will use. Default is 1.
-    :param scheduler_pool: The name of the scheduler pool to use. Default is "default".
+    This function creates a Spark session configured for the BERDL environment,
+    including support for Delta Lake, MinIO S3 storage, and Spark Connect mode.
 
-    :return: A SparkSession object
+    Args:
+        app_name: Application name. If None, generates a timestamp-based name
+        local: If True, creates a local Spark session (ignores other configs)
+        delta_lake: If True, enables Delta Lake support
+        scheduler_pool: Fair scheduler pool name (default: "default")
+        use_hive: If True, enables Hive metastore integration
+        settings: BERDLSettings instance. If None, creates new instance from env vars
+        use_spark_connect: If True, uses Spark Connect instead of legacy mode (default: True)
+
+    Returns:
+        Configured SparkSession instance
+
+    Raises:
+        EnvironmentError: If required environment variables are missing
+
+    Example:
+        >>> # Using Spark Connect (default)
+        >>> spark = get_spark_session("DatalakeMCPServer")
+
+        >>> # Using legacy mode
+        >>> spark = get_spark_session("DatalakeMCPServer", use_spark_connect=False)
+
+        >>> # Local development
+        >>> spark = get_spark_session("TestApp", local=True)
     """
 
-    app_name = (
-        app_name or f"cdm_mcp_server_session_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    )
+    if settings is None:
+        get_settings.cache_clear()
+        settings = get_settings()
 
+    # Generate app name if not provided
+    if app_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        app_name = f"datalake_mcp_server_{timestamp}"
+
+    # For local development, return simple session
     if local:
         return SparkSession.builder.appName(app_name).getOrCreate()
 
-    config: Dict[str, str] = {
-        "spark.app.name": app_name,
-        "spark.executor.cores": str(executor_cores),
-    }
+    # Build common configuration dictionary
+    config: dict[str, str] = {"spark.app.name": app_name}
 
-    # Dynamic allocation configuration
-    config.update(
-        {
-            "spark.dynamicAllocation.enabled": "true",
-            "spark.dynamicAllocation.minExecutors": "1",
-            "spark.dynamicAllocation.maxExecutors": os.getenv(
-                "MAX_EXECUTORS", str(DEFAULT_MAX_EXECUTORS)
-            ),
-        }
-    )
+    # Add default Spark configurations
+    config.update(_get_spark_defaults_conf())
 
-    # Fair scheduler configuration
-    _validate_env_vars(["SPARK_FAIR_SCHEDULER_CONFIG"], "FAIR scheduler setup")
-    config.update(
-        {
-            "spark.scheduler.mode": "FAIR",
-            "spark.scheduler.allocation.file": os.environ[
-                "SPARK_FAIR_SCHEDULER_CONFIG"
-            ],
-        }
-    )
+    # Add profile-specific executor and driver configuration
+    config.update(_get_executor_config(settings))
 
-    # Kubernetes configuration
-    _validate_env_vars(["SPARK_DRIVER_HOST"], "Kubernetes setup")
-    hostname = os.environ["SPARK_DRIVER_HOST"]
-    # Bind to all interfaces
-    config["spark.driver.bindAddress"] = "0.0.0.0"
-    if os.environ.get("USE_KUBE_SPAWNER") == "true":
-        yarn = False  # YARN is not used in the Kubernetes spawner
-        # In Kubernetes, use the pod's actual IP address for the driver host (equivalent to $(hostname -i))
-        config["spark.driver.host"] = socket.gethostbyname(socket.gethostname())
-    else:
-        # General driver host configuration - hostname is resolvable
-        config["spark.driver.host"] = hostname
-
-    # YARN configuration
-    if yarn:
-        _validate_env_vars(
-            ["YARN_RESOURCE_MANAGER_URL", "S3_YARN_BUCKET"], "YARN setup"
-        )
-        yarnparse = urlparse(os.environ["YARN_RESOURCE_MANAGER_URL"])
-
-        yarn_config = {
-            "spark.master": "yarn",
-            "spark.hadoop.yarn.resourcemanager.hostname": yarnparse.hostname,
-            "spark.hadoop.yarn.resourcemanager.address": yarnparse.netloc,
-            "spark.yarn.stagingDir": f"s3a://{os.environ['S3_YARN_BUCKET']}",
-        }
-        config.update(yarn_config)
-    else:
-        _validate_env_vars(["SPARK_MASTER_URL"], "Standalone Spark setup")
-        config["spark.master"] = os.environ["SPARK_MASTER_URL"]
-
-    # S3 configuration
-    if yarn or delta_lake:
-        config.update(_get_s3_conf())
-
-    # Delta Lake configuration
+    # Configure S3 and Delta Lake
     if delta_lake:
-        _validate_env_vars(
-            ["HADOOP_AWS_VER", "DELTA_SPARK_VER", "SCALA_VER"], "Delta Lake setup"
-        )
-        config.update(_get_delta_lake_conf())
+        config.update(_get_s3_conf(settings))
 
-        if not yarn:
-            jars = _get_jars(
-                [
-                    f"delta-spark_{os.environ['SCALA_VER']}-{os.environ['DELTA_SPARK_VER']}.jar",
-                    f"hadoop-aws-{os.environ['HADOOP_AWS_VER']}.jar",
-                ]
+    # Configure Hive metastore
+    if use_hive:
+        config["hive.metastore.uris"] = str(settings.BERDL_HIVE_METASTORE_URI)
+        config["spark.sql.catalogImplementation"] = "hive"
+        config["spark.sql.hive.metastore.version"] = "4.0.0"
+        config["spark.sql.hive.metastore.jars"] = "path"
+        config["spark.sql.hive.metastore.jars.path"] = "/usr/local/spark/jars/*"
+
+    # Branch: add mode-specific configurations
+    if use_spark_connect:
+        # Spark Connect: filter out immutable configs and use remote URL
+        config = _filter_immutable_spark_connect_configs(config)
+        config["spark.remote"] = str(settings.SPARK_CONNECT_URL)
+    else:
+        # Legacy mode: add driver/executor configs
+        if not settings.BERDL_POD_IP or not settings.SPARK_MASTER_URL:
+            raise EnvironmentError(
+                "BERDL_POD_IP and SPARK_MASTER_URL are required for legacy Spark mode"
             )
-            config["spark.jars"] = jars
-
-    print(f"Spark configuration: {config}")
-    # Create SparkConf from accumulated configuration
-    spark_conf = SparkConf().setAll(list(config.items()))
-
-    # Initialize SparkSession
-    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
-
-    # Configure scheduler pool
-    if scheduler_pool not in SPARK_POOLS:
-        print(
-            f"Warning: Scheduler pool {scheduler_pool} is not in the list of available pools: {SPARK_POOLS} "
-            f"Defaulting to {SPARK_DEFAULT_POOL} pool"
+        config.update(
+            {
+                "spark.driver.host": settings.BERDL_POD_IP,
+                "spark.master": str(settings.SPARK_MASTER_URL),
+            }
         )
-        scheduler_pool = SPARK_DEFAULT_POOL
-    spark.sparkContext.setLocalProperty("spark.scheduler.pool", scheduler_pool)
+
+    # Create and configure Spark session (unified for both modes)
+    spark_conf = SparkConf().setAll(list(config.items()))
+    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
+
+    # Post-creation configuration (only for legacy mode with SparkContext)
+    if not use_spark_connect:
+        spark.sparkContext.setLogLevel("ERROR")
+        _set_scheduler_pool(spark, scheduler_pool)
 
     return spark

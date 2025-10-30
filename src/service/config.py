@@ -1,5 +1,5 @@
 """
-Configuration settings for the CDM MCP Server.
+Configuration settings for the BERDL Datalake MCP Server.
 
 This service enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark,
 implementing the Model Context Protocol (MCP) for natural language data operations.
@@ -17,15 +17,15 @@ SERVICE_ROOT_PATH = "/apis/mcp"
 
 class Settings(BaseModel):
     """
-    Application settings for the CDM MCP Server.
+    Application settings for the BERDL Datalake MCP Server.
     """
 
-    app_name: str = "CDM MCP Server"
+    app_name: str = "BERDL Datalake MCP Server"
     app_description: str = (
         "FastAPI service for AI assistants to interact with Delta Lake tables via Spark"
     )
     api_version: str = APP_VERSION
-    service_root_path: str = SERVICE_ROOT_PATH
+    service_root_path: str = os.getenv("SERVICE_ROOT_PATH", SERVICE_ROOT_PATH)
     log_level: str = Field(
         default=os.getenv("LOG_LEVEL", "INFO"),
         description="Logging level for the application",
