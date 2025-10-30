@@ -85,7 +85,7 @@ def create_application() -> FastAPI:
         app,
         name="DeltaLakeMCP",
         description="MCP Server for interacting with Delta Lake tables via Spark",
-        include_tags=["Delta Lake"], # Only include endpoints tagged with "Delta Lake"
+        include_tags=["Delta Lake"],  # Only include endpoints tagged with "Delta Lake"
     )
     mcp.mount()
     logger.info("MCP server mounted")
@@ -107,7 +107,7 @@ def create_application() -> FastAPI:
         # Create a root FastAPI application to handle path mounting
         # This prevents the MCP client from incorrectly constructing URLs
         root_app = FastAPI()
-        
+
         # Mount the main app at the specified root path (e.g., "/apis/mcp")
         # This creates the following URL structure:
         # - Root app handles: /
@@ -128,17 +128,17 @@ def create_application() -> FastAPI:
         # 4. MCP client correctly identifies the base as the mounted path
         # 5. Tool calls are made to /apis/mcp/tools/call (correct path)
         root_app.mount(settings.service_root_path, app)
-        
+
         # Event handlers must be attached to the root app since it's what gets served
         root_app.add_event_handler("startup", startup_event)
         root_app.add_event_handler("shutdown", shutdown_event)
-        
+
         return root_app
     else:
         # No root path mounting needed - serve the app directly
         app.add_event_handler("startup", startup_event)
         app.add_event_handler("shutdown", shutdown_event)
-    
+
     return app
 
 
@@ -147,9 +147,12 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
 
+    # Validate PostgreSQL is configured for readonly access
     if os.getenv("POSTGRES_USER") != "readonly_user":
         raise ValueError("POSTGRES_USER must be set to readonly_user")
-    if os.getenv("MINIO_ACCESS_KEY") != "minio-readonly":
-        raise ValueError("MINIO_ACCESS_KEY must be set to minio-readonly")
+
+    # MinIO credentials are read dynamically from each user's home directory
+    # No validation needed here - credentials are loaded per-request from
+    # /home/{username}/.berdl_minio_credentials
 
     uvicorn.run(app_instance, host=host, port=port)

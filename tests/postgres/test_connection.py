@@ -1,6 +1,5 @@
 """Tests for the postgres connection module."""
 
-
 from src.postgres import connection
 
 

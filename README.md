@@ -1,4 +1,4 @@
-# CDM MCP Server
+# BERDL Datalake MCP Server
 
 A FastAPI-based service that enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark, implementing the Model Context Protocol (MCP) for natural language data operations.
 
@@ -24,18 +24,18 @@ For detailed documentation, please refer to the [User Guide](docs/guide/user_gui
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/kbase/cdm-mcp-server.git
-   cd cdm-mcp-server
+   git clone https://github.com/BERDataLakehouse/datalake-mcp-server.git
+   cd datalake-mcp-server
    ```
 
 2. Create required directories:
    ```bash
-   mkdir -p cdr/cdm/jupyter/cdm_shared_workspace
+   mkdir -p cdr/berdl/jupyter/berdl_shared_workspace
    ```
 
 3. Create Docker network:
    ```bash
-   docker network create cdm-jupyterhub-network
+   docker network create berdl-jupyterhub-network
    ```
 
 4. Start the services:
@@ -44,10 +44,13 @@ For detailed documentation, please refer to the [User Guide](docs/guide/user_gui
    ```
 
 5. Access the services:
-   - MCP Server: http://localhost:8000/docs
+   - MCP Server API Docs: http://localhost:8000/apis/mcp/docs
+   - MCP Server (root): http://localhost:8000/docs (no operations - use /apis/mcp/docs)
    - MinIO Console: http://localhost:9003
    - Spark Master UI: http://localhost:8090
    - JupyterHub: http://localhost:4043
+   
+   **Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
 
 ### Testing
 
