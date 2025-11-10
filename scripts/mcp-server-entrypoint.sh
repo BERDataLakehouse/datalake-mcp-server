@@ -1,9 +1,8 @@
 #!/bin/bash
+set -e
 
-# First run the original setup script defined in the cdm-spark-standalone image
-# https://github.com/kbase/cdm-spark-standalone/blob/main/scripts/entrypoint.sh#L3
-. /opt/scripts/setup.sh
+# No need for setup.sh - spark_notebook_base already has Spark configured
+# SPARK_HOME and SPARK_CONF_DIR are already set in the base image
 
-# skip launching Spark - we use this container as spark driver
-
-python -m src.main
+# Launch the MCP server
+exec python -m src.main
