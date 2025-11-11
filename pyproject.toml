@@ -32,6 +32,15 @@ dependencies = [
     "sidecar>=0.7.0",
     "packaging>=20.0",  # Required by itables
     "ruff==0.14.4",
+    # LangChain dependencies (required by berdl-notebook-utils agent module)
+    # Note: Using 0.3.x versions for compatibility with berdl-notebook-utils
+    "langchain>=0.3.18,<0.4.0",
+    "langchain-core>=0.3.29,<0.4.0",
+    "langchain-community>=0.3.18,<0.4.0",
+    "langchain-openai>=0.3.35,<0.4.0",
+    "langchain-anthropic>=0.3.22,<0.4.0",
+    "langchain-ollama>=0.3.10,<0.4.0",
+    "langchain-mcp-tools>=0.2.13",
 ]
 
 [tool.uv.sources]
