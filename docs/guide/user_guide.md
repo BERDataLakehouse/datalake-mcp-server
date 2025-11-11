@@ -1,4 +1,4 @@
-# CDM MCP Server User Guide
+# BERDL Datalake MCP Server User Guide
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -12,7 +12,7 @@
 
 ## Introduction
 
-The CDM MCP Server is a FastAPI-based service that enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark. It implements the Model Context Protocol (MCP) to provide LLM-accessible tools for data operations.
+The BERDL Datalake MCP Server is a FastAPI-based service that enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark. It implements the Model Context Protocol (MCP) to provide LLM-accessible tools for data operations.
 
 > **⚠️ Important Warning:** 
 > 
@@ -29,56 +29,79 @@ The CDM MCP Server is a FastAPI-based service that enables AI assistants to inte
 
 ## Quick Start
 
+### Option A: Using Pre-Built Images (Recommended)
+
 1. Clone the repository:
    ```bash
-   git clone https://github.com/kbase/cdm-mcp-server.git
-   cd cdm-mcp-server
+   git clone https://github.com/BERDataLakehouse/datalake-mcp-server.git
+   cd datalake-mcp-server
    ```
 
-2. Create required directories:
+2. Edit `docker-compose.yaml`:
+   - Uncomment all `image:` and `platform:` lines
+   - Comment out all `build:` sections
+
+3. Start the services:
    ```bash
-   mkdir -p cdr/cdm/jupyter/cdm_shared_workspace
+   docker compose up -d
    ```
 
-3. Create Docker network:
+### Option B: Building from Source (For Developers)
+
+1. Clone required repositories:
    ```bash
-   docker network create cdm-jupyterhub-network
+   # Clone at the same directory level as datalake-mcp-server
+   cd ..
+   git clone https://github.com/BERDataLakehouse/spark_notebook_base.git
+   git clone https://github.com/BERDataLakehouse/kube_spark_manager_image.git
+   git clone https://github.com/BERDataLakehouse/hive_metastore.git
+   cd datalake-mcp-server
    ```
+
+2. Build base images:
+   ```bash
+   cd ../spark_notebook_base
+   docker build -t spark_notebook_base:local .
+   cd ../datalake-mcp-server
+   ```
+
+3. Ensure `docker-compose.yaml` has `build:` sections uncommented (default)
 
 4. Start the services:
    ```bash
-   docker-compose up -d --build
+   docker compose up -d --build
    ```
 
-5. Access the services:
-   - MCP Server: http://localhost:8000/docs
-   - MinIO Console: http://localhost:9003
-   - Spark Master UI: http://localhost:8090
-   - JupyterHub: http://localhost:4043
+### Access the Services
+
+- **MCP Server API**: http://localhost:8000/apis/mcp/docs
+- **MCP Server Root**: http://localhost:8000/docs
+- **MinIO Console**: http://localhost:9003 (credentials: minio/minio123)
+- **Spark Master UI**: http://localhost:8090
+- **PostgreSQL**: localhost:5432 (credentials: hive/hivepassword)
+
+**Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
 
 ## Creating Sample Delta Tables
 
-### Option 1: Using JupyterHub
+### Option 1: Using Python Script
 
-1. Open your browser and go to `http://localhost:4043`.
-2. Add your CI token as a cookie:
-   - Open Developer Tools (e.g. F12) and go to the **Application** (or **Storage**) tab.
-   - Under **Cookies**, select `localhost` and add a new entry:
-     - **Name:** `kbase_session`
-     - **Value:** your CI token
-3. Refresh the page to apply the cookie.
-4. Create a notebook.
-5. Paste and run the following code to generate your sample Delta tables:
+You can create sample Delta tables directly using PySpark. Create a Python script with the following code:
 ```python
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 import random
 
-spark = spark = get_spark_session(yarn=False)
+# Create Spark session (adjust configuration as needed)
+spark = SparkSession.builder \
+    .appName("CreateSampleTables") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
 
 # Create test namespace
 namespace = 'test'
-create_namespace_if_not_exists(spark, namespace)
+spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
 
 # Create employees data
 schema = StructType([
@@ -154,27 +177,27 @@ product_df.write
 #### List Databases
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/databases/list' \
+  'http://localhost:8000/apis/mcp/delta/databases/list' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"use_postgres": true}'
+  -d '{"use_hms": true}'
 ```
 
 #### List Tables
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/databases/tables/list' \
+  'http://localhost:8000/apis/mcp/delta/databases/tables/list' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"database": "default", "use_postgres": true}'
+  -d '{"database": "default", "use_hms": true}'
 ```
 
 #### Get Table Schema
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/databases/tables/schema' \
+  'http://localhost:8000/apis/mcp/delta/databases/tables/schema' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
@@ -184,7 +207,7 @@ curl -X 'POST' \
 #### Get Sample Data
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/tables/sample' \
+  'http://localhost:8000/apis/mcp/delta/tables/sample' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
@@ -194,7 +217,7 @@ curl -X 'POST' \
 #### Count Table Rows
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/tables/count' \
+  'http://localhost:8000/apis/mcp/delta/tables/count' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
@@ -204,7 +227,7 @@ curl -X 'POST' \
 #### Query Table
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/delta/tables/query' \
+  'http://localhost:8000/apis/mcp/delta/tables/query' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
@@ -213,7 +236,7 @@ curl -X 'POST' \
 
 ## AI Assistant Integration
 
-The CDM MCP Server implements the Model Context Protocol (MCP), allowing AI assistants to interact with your Delta Lake tables using natural language. This section explains how to configure and use the server with various MCP-compatible clients.
+The BERDL Datalake MCP Server implements the Model Context Protocol (MCP), allowing AI assistants to interact with your Delta Lake tables using natural language. This section explains how to configure and use the server with various MCP-compatible clients.
 
 > **⚠️ Reminder** 
 > 
@@ -227,7 +250,7 @@ The CDM MCP Server implements the Model Context Protocol (MCP), allowing AI assi
    {
      "mcpServers": {
        "delta-lake-mcp": {
-         "url": "http://localhost:8000/mcp",
+         "url": "http://localhost:8000/apis/mcp/mcp",
          "enabled": true,
          "headers": {
            "Authorization": "Bearer YOUR_KBASE_TOKEN"
@@ -258,7 +281,7 @@ Most MCP‑enabled tools offer two ways to configure a host:
 3. Click "Add Server"
 4. Configure with:
    - Name: delta-lake-mcp
-   - URL: http://localhost:8000/mcp
+   - URL: http://localhost:8000/apis/mcp/mcp
    - Headers:
      ```json
      {
@@ -274,8 +297,8 @@ Most MCP‑enabled tools offer two ways to configure a host:
 3. Click "Add MCP Server"
 4. Enter the following details:
    - Name: delta-lake-mcp
-   - URL: http://localhost:8000/mcp
-   - Headers: 
+   - URL: http://localhost:8000/apis/mcp/mcp
+   - Headers:
      ```json
      {
        "Authorization": "Bearer YOUR_KBASE_TOKEN"
@@ -320,8 +343,8 @@ Once configured, you can interact with your Delta tables using natural language.
 - Specify any filters or conditions clearly
 - Use natural language to describe aggregations or calculations
 
-## Using the CDM MCP Server Deployed in Rancher2
-Use the steps below to access the CDM MCP Server deployed in Rancher 2 Kubernetes cluster from your local machine.
+## Using the BERDL Datalake MCP Server Deployed in Rancher2
+Use the steps below to access the BERDL Datalake MCP Server deployed in Rancher 2 Kubernetes cluster from your local machine.
 
 > **⚠️ Warning**  
 > 
@@ -349,13 +372,13 @@ sudo ssh -fN \
 
 Replace `<ac.anl_username>` with your actual ANL username.
 
-For more information on SSH tunnels, refer to the [CDM JupyterHub User Guide](https://github.com/kbase/cdm-jupyterhub/blob/main/docs/user_guide.md#1-create-ssh-tunnel).
+For more information on SSH tunnels, refer to the [BERDL JupyterHub User Guide](https://github.com/BERDataLakehouse/BERDL_JupyterHub/blob/main/docs/user_guide.md#1-create-ssh-tunnel).
 
 ### Step 2: Update MCP Configuration
 Create or update your MCP configuration file at `~/.mcp/mcp.json`:
 
-> **🔑 Authentication Note**  
-> The currently deployed CDM MCP Server is configured to use **CI KBase auth server**. Please ensure you are using your **CI KBase Auth token** (not production tokens) for authorization.
+> **🔑 Authentication Note**
+> The currently deployed BERDL Datalake MCP Server is configured to use **CI KBase auth server**. Please ensure you are using your **CI KBase Auth token** (not production tokens) for authorization.
 
 ```json
 {

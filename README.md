@@ -22,35 +22,58 @@ For detailed documentation, please refer to the [User Guide](docs/guide/user_gui
 
 ## Quick Start
 
+### Option A: Using Pre-Built Images (Recommended)
+
 1. Clone the repository:
    ```bash
    git clone https://github.com/BERDataLakehouse/datalake-mcp-server.git
    cd datalake-mcp-server
    ```
 
-2. Create required directories:
+2. Edit `docker-compose.yaml`:
+   - Uncomment all `image:` and `platform:` lines
+   - Comment out all `build:` sections
+
+3. Start the services:
    ```bash
-   mkdir -p cdr/berdl/jupyter/berdl_shared_workspace
+   docker compose up -d
    ```
 
-3. Create Docker network:
+### Option B: Building from Source (For Developers)
+
+1. Clone required repositories:
    ```bash
-   docker network create berdl-jupyterhub-network
+   # Clone at the same directory level as datalake-mcp-server
+   cd ..
+   git clone https://github.com/BERDataLakehouse/spark_notebook_base.git
+   git clone https://github.com/BERDataLakehouse/kube_spark_manager_image.git
+   git clone https://github.com/BERDataLakehouse/hive_metastore.git
+   cd datalake-mcp-server
    ```
+
+2. Build base images:
+   ```bash
+   cd ../spark_notebook_base
+   docker build -t spark_notebook_base:local .
+   cd ../datalake-mcp-server
+   ```
+
+3. Ensure `docker-compose.yaml` has `build:` sections uncommented (default)
 
 4. Start the services:
    ```bash
-   docker-compose up -d --build
+   docker compose up -d --build
    ```
 
-5. Access the services:
-   - MCP Server API Docs: http://localhost:8000/apis/mcp/docs
-   - MCP Server (root): http://localhost:8000/docs (no operations - use /apis/mcp/docs)
-   - MinIO Console: http://localhost:9003
-   - Spark Master UI: http://localhost:8090
-   - JupyterHub: http://localhost:4043
-   
-   **Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
+### Access the Services
+
+- **MCP Server API**: http://localhost:8000/apis/mcp/docs
+- **MCP Server Root**: http://localhost:8000/docs
+- **MinIO Console**: http://localhost:9003 (credentials: minio/minio123)
+- **Spark Master UI**: http://localhost:8090
+- **PostgreSQL**: localhost:5432 (credentials: hive/hivepassword)
+
+**Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
 
 ### Testing
 

@@ -1,158 +1,228 @@
-# This docker-compose is for developer convenience, not for running in production
+# Docker Compose configuration for testing BERDL Datalake MCP Server
+# This docker-compose is for developer convenience, not for running in production.
+#
+# INSTRUCTIONS:
+# =============
+#
+# OPTION A: USING PRE-BUILT IMAGES (RECOMMENDED FOR MOST USERS)
+# --------------------------------------------------------------
+# If you want to use pre-built images from the registry:
+# 1. Uncomment the 'image:' and 'platform:' lines in each service
+# 2. Comment out the 'build:' sections
+# 3. Run: docker compose up -d
+#
+# No build steps required!
+#
+# OPTION B: BUILDING FROM LOCAL SOURCE CODE (FOR DEVELOPERS)
+# -----------------------------------------------------------
+# If you're developing and want to build from local source:
+#
+# 1. CLONE REQUIRED REPOSITORIES:
+#    You need to clone the following repos from https://github.com/BERDataLakehouse
+#    at the same directory level as this datalake-mcp-server directory:
+#
+#    git clone https://github.com/BERDataLakehouse/spark_notebook_base.git
+#    git clone https://github.com/BERDataLakehouse/kube_spark_manager_image.git
+#
+#    Your directory structure should look like:
+#    parent/
+#      ├── datalake-mcp-server/      (this directory)
+#      ├── spark_notebook_base/
+#      └── kube_spark_manager_image/
+#
+# 2. BUILD REQUIRED BASE IMAGES FIRST:
+#    cd ../spark_notebook_base && \
+#    docker build -t spark_notebook_base:local .
+#
+# 3. ENSURE BUILD SECTIONS ARE UNCOMMENTED:
+#    The docker-compose.yaml should have 'build:' sections uncommented
+#    and 'image:' lines commented out for services you want to build locally.
+#
+# 4. RUN DOCKER COMPOSE:
+#    docker compose up -d --build
+#
+#    NOTE: Base images must be rebuilt when Dockerfiles or dependencies change.
+#
+# AUTHENTICATION SETUP (REQUIRED FOR BOTH OPTIONS):
+# --------------------------------------------------
+# - Update KBASE_AUTH_TOKEN with your KBase CI auth token
+# - Update NB_USER with your KBase CI username
+#
+# DEFAULT CREDENTIALS:
+# --------------------
+# - MinIO: minio/minio123
+# - PostgreSQL: hive/hivepassword
+#
+# ARCHITECTURE NOTES:
+# -------------------
+# This stack includes:
+# - Spark standalone cluster (master + 2 workers)
+# - MinIO S3-compatible storage
+# - PostgreSQL (Hive Metastore backend)
+# - Redis (distributed caching)
+# - Datalake MCP Server (main service under test)
 
 services:
+  datalake-mcp-server:
+    # image: ghcr.io/berdatalakehouse/datalake-mcp-server:main
+    # platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
+    ports:
+      - "8000:8000"  # MCP server API
+    environment:
+      # SPARK CONFIGURATION
+      - SPARK_CONNECT_URL_TEMPLATE=sc://spark-master:15002
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+
+      # MINIO CONFIGURATION
+      - MINIO_ENDPOINT_URL=minio:9002
+
+      # AUTHENTICATION CONFIGURATION
+      - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
+      - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
+
+      # POSTGRESQL CONFIGURATION (read-only user)
+      - POSTGRES_URL=postgres:5432
+      - POSTGRES_DB=hive
+      - POSTGRES_USER=readonly_user
+      - POSTGRES_PASSWORD=readonly_password
+
+      # REDIS CONFIGURATION
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+
+      # DATA LAKE CONFIGURATION
+      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/users-sql-warehouse
+    volumes:
+      # Mount the shared /home directory to access user credentials
+      # This allows the MCP server to dynamically read any user's MinIO credentials
+      # from /home/{username}/.berdl_minio_credentials
+      - users_home:/home:ro
+    depends_on:
+      - spark-master
+      - hive-metastore
+      - minio
+      - postgres
+      - redis
 
   spark-master:
-    image: ghcr.io/kbase/cdm-spark-standalone:pr-36
-    platform: linux/amd64
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
     ports:
-      - "8090:8090"
+      - "8090:8080"     # Spark Master Web UI
+      - "7077:7077"     # Spark Master
+      - "15002:15002"   # Spark Connect server
     environment:
       - SPARK_MODE=master
-      - SPARK_MASTER_WEBUI_PORT=8090
-      - MAX_EXECUTORS=5
-      - EXECUTOR_CORES=2
-      - MAX_CORES_PER_APPLICATION=10
-      - POSTGRES_USER=hive
-      - POSTGRES_PASSWORD=hivepassword
-      - POSTGRES_DB=hive
-      - POSTGRES_URL=postgres:5432
-      - DATANUCLEUS_AUTO_CREATE_TABLES=true
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/warehouse
-    volumes:
-      - ./cdr/cdm/jupyter/cdm_shared_workspace:/cdm_shared_workspace
-    networks:
-      - cdm-jupyterhub-network
+      - SPARK_MASTER_HOST=0.0.0.0
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    depends_on:
+      - hive-metastore
+      - minio
+      - redis
 
   spark-worker-1:
-    image: ghcr.io/kbase/cdm-spark-standalone:pr-36
-    platform: linux/amd64
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
     ports:
-      - "8081:8081"
+      - "8081:8081"  # Spark Worker Web UI
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_CORES=10
-      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_PORT=8081
       - SPARK_WORKER_WEBUI_PORT=8081
-      - POSTGRES_USER=hive
-      - POSTGRES_PASSWORD=hivepassword
-      - POSTGRES_DB=hive
-      - POSTGRES_URL=postgres:5432
-      - DATANUCLEUS_AUTO_CREATE_TABLES=true
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/warehouse
-    volumes:
-      - ./cdr/cdm/jupyter/cdm_shared_workspace:/cdm_shared_workspace
-    networks:
-      - cdm-jupyterhub-network
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    depends_on:
+      - spark-master
 
   spark-worker-2:
-    image: ghcr.io/kbase/cdm-spark-standalone:pr-36
-    platform: linux/amd64
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
     ports:
-      - "8082:8082"
+      - "8082:8082"  # Spark Worker Web UI
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
       - SPARK_WORKER_CORES=10
-      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_PORT=8082
       - SPARK_WORKER_WEBUI_PORT=8082
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    depends_on:
+      - spark-master
+
+  hive-metastore:
+    # image: ghcr.io/berdatalakehouse/hive_metastore:main
+    # platform: linux/amd64
+    build:
+      context: ../hive_metastore
+      dockerfile: Dockerfile
+      args:
+        # IMPORTANT: Spark 4.0.0 is only officially compatible with Hive Metastore 4.0.0
+        # Using newer Hive versions (4.1.0+) causes Thrift protocol incompatibilities
+        HIVE_IMAGE_TAG: "4.0.0"
+    ports:
+      - "9083:9083"  # Hive Metastore Thrift
+    environment:
+      # PostgreSQL database configuration
+      - POSTGRES_DB=hive
       - POSTGRES_USER=hive
       - POSTGRES_PASSWORD=hivepassword
-      - POSTGRES_DB=hive
-      - POSTGRES_URL=postgres:5432
-      - DATANUCLEUS_AUTO_CREATE_TABLES=true
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/warehouse
-    volumes:
-      - ./cdr/cdm/jupyter/cdm_shared_workspace:/cdm_shared_workspace
-    networks:
-      - cdm-jupyterhub-network
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
 
-  minio:
-    image: minio/minio
-    ports:
-      - "9002:9002"
-      # MinIO Console is available at http://localhost:9003
-      - "9003:9003"
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio123
+      # MinIO S3 configuration
+      - S3_ENDPOINT=http://minio:9002
+      - S3_ACCESS_KEY=minio
+      - S3_SECRET_KEY=minio123
+
+      # Delta Lake warehouse directory
+      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/users-sql-warehouse
+    depends_on:
+      - postgres
+      - minio
     healthcheck:
-      # reference: https://github.com/rodrigobdz/docker-compose-healthchecks?tab=readme-ov-file#minio-release2023-11-01t18-37-25z-and-older
-      test: timeout 5s bash -c ':> /dev/tcp/127.0.0.1/9002' || exit 1
-      interval: 1s
+      test: ["CMD", "nc", "-z", "localhost", "9083"]
+      interval: 30s
       timeout: 10s
-      retries: 5
-    # Note there is no bucket by default
-    command: server --address 0.0.0.0:9002 --console-address 0.0.0.0:9003 /data
-    networks:
-      - cdm-jupyterhub-network
-
-  minio-create-bucket:
-    image: minio/mc
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: /scripts/minio_create_bucket_entrypoint.sh
-    volumes:
-      - ./config/cdm-read-only-policy.json:/config/cdm-read-only-policy.json
-      - ./config/cdm-read-write-policy.json:/config/cdm-read-write-policy.json
-      - ./config/cdm-spark-job-logs-policy.json:/config/cdm-spark-job-logs-policy.json
-      - ./scripts/minio_create_bucket_entrypoint.sh:/scripts/minio_create_bucket_entrypoint.sh
-    networks:
-      - cdm-jupyterhub-network
-
-  cdm_jupyterhub:
-    image: ghcr.io/kbase/cdm-jupyterhub:pr-193
-    platform: linux/amd64
-    ports:
-      - "4043:4043"
-    depends_on:
-      - minio-create-bucket
-    environment:
-      - NOTEBOOK_PORT=4043
-      - JUPYTER_MODE=jupyterhub
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_DRIVER_HOST=cdm_jupyterhub
-      - MINIO_URL=http://minio:9002
-      - MINIO_ACCESS_KEY=minio-readonly
-      - MINIO_SECRET_KEY=minio123
-      - MINIO_RW_ACCESS_KEY=minio-readwrite
-      - MINIO_RW_SECRET_KEY=minio123
-      - MAX_EXECUTORS=4
-      - POSTGRES_USER=hive
-      - POSTGRES_PASSWORD=hivepassword
-      - POSTGRES_DB=hive
-      - POSTGRES_URL=postgres:5432
-      - JUPYTERHUB_ADMIN_PASSWORD=testpassword123
-      - NETWORK_NAME=cdm-jupyterhub-network
-      - JUPYTERHUB_USER_IMAGE=ghcr.io/kbase/cdm-jupyterhub:pr-177
-      # Ensure that the JUPYTERHUB_MOUNT_BASE_DIR directory below is an absolute path and exists on your local machine.
-      - JUPYTERHUB_MOUNT_BASE_DIR=/cdr/cdm/jupyter
-      - ENVIRONMENT=dev
-      - KB_ENV=ci
-      - AUTH_FULL_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
-      - USE_KBASE_AUTHENTICATOR=true
-      - USE_KUBE_SPAWNER=false
-      - REMOVE_STOPPED_CONTAINER_AND_POD=false
-      - SPARK_JOB_LOG_DIR=s3a://cdm-spark-job-logs/spark-job-logs
-      - SPARK_JOB_LOG_DIR_CATEGORY=jupyter-master
-      - MINIO_URL=http://minio:9002
-      - MINIO_LOG_USER_ACCESS_KEY=minio-log-access
-      - MINIO_LOG_USER_SECRET_KEY=minio123
-    volumes:
-      - ./cdr/cdm/jupyter/cdm_shared_workspace:/cdm_shared_workspace
-      - ./cdr/cdm/jupyter/jupyterhub_secrets:/jupyterhub_secrets
-      - ./cdr/cdm/jupyter/jupyterhub/users_home:/jupyterhub/users_home
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - cdm-jupyterhub-network
+      retries: 3
 
   postgres:
     image: postgres:16.3
@@ -162,57 +232,59 @@ services:
       - POSTGRES_USER=hive
       - POSTGRES_PASSWORD=hivepassword
       - POSTGRES_DB=hive
-      - READONLY_USER=readonly_user
-      - READONLY_PASSWORD=readonly_password
     volumes:
-      - ./cdr/cdm/jupyter/cdm-postgres/data:/var/lib/postgresql/data
-      - ./scripts/init-postgres-readonly.sh:/docker-entrypoint-initdb.d/init-postgres-readonly.sh
-    networks:
-      - cdm-jupyterhub-network
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-postgres-readonly.sh:/docker-entrypoint-initdb.d/init-postgres-readonly.sh:ro
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z-cpuv1
+    ports:
+      - "9002:9002"  # MinIO API
+      - "9003:9003"  # MinIO Console
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    healthcheck:
+      test: timeout 5s bash -c ':> /dev/tcp/127.0.0.1/9002' || exit 1
+      interval: 1s
+      timeout: 10s
+      retries: 5
+    command: server --address 0.0.0.0:9002 --console-address 0.0.0.0:9003 /data
+    volumes:
+      - minio_data:/data
+
+  minio-create-bucket:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Configuring MinIO...';
+      mc alias set local http://minio:9002 minio minio123;
+
+      echo 'Creating buckets...';
+      mc mb --ignore-existing local/cdm-lake;
+      mc mb --ignore-existing local/cdm-spark-job-logs;
+
+      echo 'Creating service accounts...';
+      mc admin user svcacct add --access-key minio-readonly --secret-key minio123 local minio || true;
+      mc admin user svcacct add --access-key minio-readwrite --secret-key minio123 local minio || true;
+      mc admin user svcacct add --access-key minio-log-access --secret-key minio123 local minio || true;
+
+      echo 'MinIO configuration complete.';
+      "
 
   redis:
-    image: redis:8.0.1
+    image: redis:7-alpine
     ports:
       - "6379:6379"
-    volumes:
-      - ./cdr/cdm/jupyter/cdm-redis:/data
     command: redis-server --appendonly yes
-    networks:
-      - cdm-jupyterhub-network
+    volumes:
+      - redis_data:/data
 
-  cdm-mcp-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    platform: linux/amd64
-    ports:
-      - "8000:8000"
-    environment:
-      - MINIO_URL=http://minio:9002
-      - MINIO_ACCESS_KEY=minio-readonly
-      - MINIO_SECRET_KEY=minio123
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
-      - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
-      - SPARK_DRIVER_HOST=cdm-mcp-server
-      - POSTGRES_USER=readonly_user
-      - POSTGRES_PASSWORD=readonly_password
-      - POSTGRES_DB=hive
-      - POSTGRES_URL=postgres:5432
-      - SPARK_POOL=highPriority
-      - EXECUTOR_CORES=10
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/warehouse
-      - SPARK_JOB_LOG_DIR=s3a://cdm-spark-job-logs/spark-job-logs
-      - SPARK_JOB_LOG_DIR_CATEGORY=mcp-server
-      - MINIO_URL=http://minio:9002
-      - MINIO_LOG_USER_ACCESS_KEY=minio-log-access
-      - MINIO_LOG_USER_SECRET_KEY=minio123
-    networks:
-      - cdm-jupyterhub-network
-
-networks:
-  # Created by `docker network create cdm-jupyterhub-network`
-  cdm-jupyterhub-network:
-    external: true
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  users_home:  # Shared volume for all user home directories
