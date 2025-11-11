@@ -1,4 +1,4 @@
-# This docker-compose is for developer convenience, not for running in production.
+# This docker-compose is for developer convenience, not for running in production
 
 services:
 
