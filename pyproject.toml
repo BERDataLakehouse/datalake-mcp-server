@@ -1,23 +1,23 @@
 [project]
 name = "datalake-mcp-server"
 version = "0.1.0"
-description = "CDM MCP Server"
+description = "BERDL Datalake MCP Server"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
-    "fastapi==0.120.2",
+    "fastapi==0.121.1",
     "uvicorn==0.38.0",
     "fastapi-mcp==0.4.0",
-    "mcp==1.19.0",
+    "mcp==1.21.0",
     "pyspark[connect]==4.0.0",
     "delta-spark==4.0.0",
     "aiohttp==3.13.2",
-    "httpx>=0.27.0",
+    "httpx>=0.28.1",
     "cacheout==0.16.0",
     "minio==7.2.18",
     "psycopg==3.2.12",
     "sqlparse==0.5.3",
-    "pydantic-settings==2.11.0",
+    "pydantic-settings==2.12.0",
     "berdl-notebook-utils",  # Shared utilities from spark_notebook
     # All dependencies from berdl-notebook-utils to make it functional
     "cdm-spark-manager-client",
@@ -25,13 +25,13 @@ dependencies = [
     "minio-manager-service-client",
     "datalake-mcp-server-client",
     "hmsclient>=0.1.1",
-    "attrs>=25.3.0",
-    "pandas>=2.3.2",
+    "attrs>=25.4.0",
+    "pandas>=2.3.3",
     "itables>=2.4.5",
-    "ipywidgets>=8.1.7",
+    "ipywidgets>=8.1.8",
     "sidecar>=0.7.0",
     "packaging>=20.0",  # Required by itables
-    "ruff==0.13.0",
+    "ruff==0.14.4",
 ]
 
 [tool.uv.sources]
@@ -43,7 +43,7 @@ datalake-mcp-server-client = { git = "https://github.com/BERDataLakehouse/datala
 
 [dependency-groups]
 dev = [
-    "ipython==9.6.0",
-    "pytest==8.4.2",
+    "ipython==9.7.0",
+    "pytest==9.0.0",
     "pytest-cov==7.0.0",
 ]
