@@ -47,7 +47,7 @@ dependencies = [
 berdl-notebook-utils = { git = "https://github.com/BERDataLakehouse/spark_notebook.git", subdirectory = "notebook_utils", rev = "main" }
 cdm-task-service-client = { git = "https://github.com/kbase/cdm-task-service-client.git", rev = "0.2.1" }
 cdm-spark-manager-client = { git = "https://github.com/kbase/cdm-kube-spark-manager-client.git", rev = "0.0.1" }
-minio-manager-service-client = { git = "https://github.com/BERDataLakehouse/minio_manager_service_client.git", rev = "v0.0.4" }
+minio-manager-service-client = { git = "https://github.com/BERDataLakehouse/minio_manager_service_client.git", rev = "v0.0.5" }
 datalake-mcp-server-client = { git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git", rev = "v0.0.1" }
 
 [dependency-groups]
