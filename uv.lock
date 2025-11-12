@@ -547,7 +547,7 @@ requires-dist = [
     { name = "cacheout", specifier = "==0.16.0" },
     { name = "cdm-spark-manager-client", git = "https://github.com/kbase/cdm-kube-spark-manager-client.git?rev=0.0.1" },
     { name = "cdm-task-service-client", git = "https://github.com/kbase/cdm-task-service-client.git?rev=0.2.1" },
-    { name = "datalake-mcp-server-client", git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git?rev=v0.0.1" },
+    { name = "datalake-mcp-server-client", git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git?rev=v0.0.2" },
     { name = "delta-spark", specifier = "==4.0.0" },
     { name = "fastapi", specifier = "==0.121.1" },
     { name = "fastapi-mcp", specifier = "==0.4.0" },
@@ -569,7 +569,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "psycopg", specifier = "==3.2.12" },
     { name = "pydantic-settings", specifier = "==2.12.0" },
-    { name = "pyspark", extras = ["connect"], specifier = "==4.0.0" },
+    { name = "pyspark", extras = ["connect"], specifier = "==4.0.1" },
     { name = "ruff", specifier = "==0.14.4" },
     { name = "sidecar", specifier = ">=0.7.0" },
     { name = "sqlparse", specifier = "==0.5.3" },
@@ -586,7 +586,7 @@ dev = [
 [[package]]
 name = "datalake-mcp-server-client"
 version = "0.0.1"
-source = { git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git?rev=v0.0.1#241521c96eedec625cb0eea8d2f5ffdfc9c2c8df" }
+source = { git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git?rev=v0.0.2#8f8a6f630c4ace39a1d4270dbffe06c432a48062" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
@@ -1965,12 +1965,12 @@ crypto = [
 
 [[package]]
 name = "pyspark"
-version = "4.0.0"
+version = "4.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "py4j" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/0e/5b38d51f1b1c2618cccfbf35093268665af9a3bdb493e5a3ecd991def633/pyspark-4.0.0.tar.gz", hash = "sha256:38db1b4f6095a080d7605e578d775528990e66dc326311d93e94a71cfc24e5a5", size = 434132212, upload-time = "2025-05-23T03:29:33.916Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ae/40/1414582f16c1d7b051c668c2e19c62d21a18bd181d944cb24f5ddbb2423f/pyspark-4.0.1.tar.gz", hash = "sha256:9d1f22d994f60369228397e3479003ffe2dd736ba79165003246ff7bd48e2c73", size = 434204896, upload-time = "2025-09-06T07:15:57.091Z" }
 
 [package.optional-dependencies]
 connect = [
