@@ -138,8 +138,9 @@ class KBaseAuth:
         j = await _get(self._me_url, {"Authorization": token})
         croles = set(j["customroles"])
         if self._req_roles and not self._req_roles <= croles:
+            required_roles_str = ", ".join(sorted(self._req_roles))
             raise MissingRoleError(
-                "The user is missing a required authentication role to use the service."
+                f"The user is missing required authentication roles to use the service. Required roles: {required_roles_str}"
             )
         v = (j["user"], self._get_admin_role(croles))
         self._cache.set(token, v)

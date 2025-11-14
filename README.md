@@ -75,6 +75,18 @@ For detailed documentation, please refer to the [User Guide](docs/guide/user_gui
 
 **Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
 
+## Authentication
+
+The service uses KBase authentication with role-based access control:
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `KBASE_AUTH_URL` | No | `https://ci.kbase.us/services/auth/` | KBase authentication service URL |
+| `KBASE_ADMIN_ROLES` | No | `KBASE_ADMIN` | Comma-separated list of KBase roles with full admin access |
+| `KBASE_REQUIRED_ROLES` | No | `BERDL_USER` | Comma-separated list of KBase roles required to authenticate. Users must have all these roles |
+
 ### Testing
 
 ```bash
