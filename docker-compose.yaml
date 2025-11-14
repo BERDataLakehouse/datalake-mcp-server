@@ -86,6 +86,7 @@ services:
       # AUTHENTICATION CONFIGURATION
       - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
       - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
+      - KBASE_REQUIRED_ROLES=BERDL_USER
 
       # POSTGRESQL CONFIGURATION (read-only user)
       - POSTGRES_URL=postgres:5432

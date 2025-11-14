@@ -41,9 +41,10 @@ async def build_app(app: FastAPI) -> None:
     # Initialize auth with KBase auth URL and admin roles from environment variables
     auth_url = os.environ.get("KBASE_AUTH_URL", "https://ci.kbase.us/services/auth/")
     admin_roles = os.environ.get("KBASE_ADMIN_ROLES", "KBASE_ADMIN").split(",")
+    required_roles = os.environ.get("KBASE_REQUIRED_ROLES", "BERDL_USER").split(",")
 
     logger.info("Connecting to KBase auth service...")
-    auth = await KBaseAuth.create(auth_url, full_admin_roles=admin_roles)
+    auth = await KBaseAuth.create(auth_url, required_roles=required_roles, full_admin_roles=admin_roles)
     logger.info("KBase auth service connected")
 
     # Store components in app state
