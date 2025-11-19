@@ -13,6 +13,7 @@ dependencies = [
     "cacheout==0.16.0",
     "psycopg==3.2.12",
     "sqlparse==0.5.3",
+    "ruff==0.14.4",
     "berdl_notebook_utils",
 ]
 
