@@ -5,50 +5,19 @@ description = "BERDL Datalake MCP Server"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi==0.121.1",
+    "fastapi==0.121.2",
     "uvicorn==0.38.0",
     "fastapi-mcp==0.4.0",
-    "mcp==1.21.0",
-    "pyspark[connect]==4.0.1",
-    "delta-spark==4.0.0",
+    "mcp==1.21.2",
     "aiohttp==3.13.2",
-    "httpx>=0.28.1",
     "cacheout==0.16.0",
-    "minio==7.2.18",
     "psycopg==3.2.12",
     "sqlparse==0.5.3",
-    "pydantic-settings==2.12.0",
-    "berdl-notebook-utils",  # Shared utilities from spark_notebook
-    # All dependencies from berdl-notebook-utils to make it functional
-    "cdm-spark-manager-client",
-    "cdm-task-service-client",
-    "minio-manager-service-client",
-    "datalake-mcp-server-client",
-    "hmsclient>=0.1.1",
-    "attrs>=25.4.0",
-    "pandas>=2.3.3",
-    "itables>=2.4.5",
-    "ipywidgets>=8.1.8",
-    "sidecar>=0.7.0",
-    "packaging>=20.0",  # Required by itables
-    "ruff==0.14.4",
-    # LangChain dependencies (required by berdl-notebook-utils agent module)
-    # Note: Using 0.3.x versions for compatibility with berdl-notebook-utils
-    "langchain>=0.3.18,<0.4.0",
-    "langchain-core>=0.3.29,<0.4.0",
-    "langchain-community>=0.3.18,<0.4.0",
-    "langchain-openai>=0.3.35,<0.4.0",
-    "langchain-anthropic>=0.3.22,<0.4.0",
-    "langchain-ollama>=0.3.10,<0.4.0",
-    "langchain-mcp-tools>=0.2.13",
+    "berdl_notebook_utils",
 ]
 
 [tool.uv.sources]
-berdl-notebook-utils = { git = "https://github.com/BERDataLakehouse/spark_notebook.git", subdirectory = "notebook_utils", rev = "main" }
-cdm-task-service-client = { git = "https://github.com/kbase/cdm-task-service-client.git", rev = "0.2.1" }
-cdm-spark-manager-client = { git = "https://github.com/kbase/cdm-kube-spark-manager-client.git", rev = "0.0.1" }
-minio-manager-service-client = { git = "https://github.com/BERDataLakehouse/minio_manager_service_client.git", rev = "v0.0.5" }
-datalake-mcp-server-client = { git = "https://github.com/BERDataLakehouse/datalake-mcp-server-client.git", rev = "v0.0.2" }
+berdl_notebook_utils = { git = "https://github.com/BERDataLakehouse/spark_notebook.git", subdirectory = "notebook_utils", rev = "main" }
 
 [dependency-groups]
 dev = [

@@ -41,17 +41,25 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
       - name: Free Disk Space (Ubuntu)
-        if: ${{ (github.event_name == 'release' && github.event.action == 'published') || github.ref_type == 'tag' }}
+        if: ${{ github.event_name != 'pull_request' }}
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ github.event_name == 'release' && github.event.action == 'published' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          # Build for both Intel (amd64) and Apple Silicon (arm64) Macs
+          # Pull requests only build amd64 for faster CI
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
