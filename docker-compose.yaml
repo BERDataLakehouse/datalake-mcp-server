@@ -95,8 +95,8 @@ services:
       - POSTGRES_PASSWORD=readonly_password
 
       # REDIS CONFIGURATION
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
 
       # DATA LAKE CONFIGURATION
       - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/users-sql-warehouse
