@@ -48,6 +48,10 @@ class BERDLSettings(BaseSettings):
         default=False, description="Use secure connection (True/False)"
     )
 
+    # Redis configuration
+    BERDL_REDIS_HOST: str = Field(default="redis", description="Redis host name")
+    BERDL_REDIS_PORT: int = Field(default=6379, description="Redis port")
+
     # Spark configuration
     SPARK_HOME: str = Field(
         default="/usr/local/spark", description="Spark installation directory"
