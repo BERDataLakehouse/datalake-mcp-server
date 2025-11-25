@@ -75,9 +75,7 @@ def get_cached_value(namespace: str, cache_key: str) -> Optional[CachePayload]:
             decoded_value = raw_value.decode("utf-8")
         else:
             decoded_value = cast(str, raw_value)
-        logger.info(
-            "Cache hit for namespace=%s key=%s", namespace, cache_key
-        )
+        logger.info("Cache hit for namespace=%s key=%s", namespace, cache_key)
         return json.loads(decoded_value)
     except (RedisError, json.JSONDecodeError):
         logger.exception(
