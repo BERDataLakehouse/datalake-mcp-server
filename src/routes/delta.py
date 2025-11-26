@@ -25,6 +25,8 @@ from src.service.models import (
     TableSampleResponse,
     TableSchemaRequest,
     TableSchemaResponse,
+    TableSelectRequest,
+    TableSelectResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,3 +239,31 @@ def query_table(
         query=request.query,
     )
     return TableQueryResponse(result=result)
+
+
+@router.post(
+    "/tables/select",
+    response_model=TableSelectResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Execute a structured SELECT query",
+    description=(
+        "Builds and executes a SELECT query from structured parameters. "
+        "Supports column selection, aggregations (COUNT, SUM, AVG, MIN, MAX), "
+        "JOINs, WHERE filters, GROUP BY, HAVING, ORDER BY, DISTINCT, and pagination. "
+        "The backend builds the query safely, preventing SQL injection."
+    ),
+    operation_id="select_delta_table",
+)
+def select_table(
+    request: TableSelectRequest,
+    spark=Depends(get_spark_session),
+    auth=Depends(auth),
+) -> TableSelectResponse:
+    """
+    Endpoint to execute a structured SELECT query with pagination support.
+
+    This endpoint allows users to build complex queries without writing raw SQL.
+    The backend constructs the query from the provided parameters, ensuring
+    security and proper escaping of all values.
+    """
+    return delta_service.select_from_delta_table(spark=spark, request=request)
