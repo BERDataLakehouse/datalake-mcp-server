@@ -5,11 +5,13 @@ Service layer for interacting with Delta Lake tables via Spark.
 import hashlib
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import sqlparse
 from pyspark.sql import SparkSession
 
+from src.cache.redis_cache import get_cached_value, set_cached_value
 from src.delta_lake.data_store import database_exists, table_exists
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
@@ -17,12 +19,20 @@ from src.service.exceptions import (
     SparkOperationError,
     SparkQueryError,
 )
+from src.service.models import (
+    AggregationSpec,
+    ColumnSpec,
+    FilterCondition,
+    JoinClause,
+    PaginationInfo,
+    TableSelectRequest,
+    TableSelectResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_SAMPLE_ROWS = 1000
 CACHE_EXPIRY_SECONDS = 3600  # Cache results for 1 hour by default
-NAMESPACE_PREFIX = "cdm-mcp"
 
 # Common SQL keywords that might indicate destructive operations
 FORBIDDEN_KEYWORDS = {
@@ -130,40 +140,14 @@ def _generate_cache_key(params: Dict[str, Any]) -> str:
     return param_hash
 
 
-def _get_from_cache(
-    spark: SparkSession, namespace: str, cache_key: str
-) -> Optional[List[Dict[str, Any]]]:
+def _get_from_cache(namespace: str, cache_key: str) -> Optional[List[Dict[str, Any]]]:
     """
     Try to get data from Redis cache.
     """
-    try:
-        table_name = f"{NAMESPACE_PREFIX}-{namespace}"
-
-        cache_df = (
-            spark.read.format("org.apache.spark.sql.redis")
-            .option("table", table_name)
-            .option("key.column", "cache_key")
-            .load()
-        )
-
-        if not cache_df.rdd.isEmpty():
-            filtered_df = cache_df.filter(f"cache_key = '{cache_key}'")
-            if not filtered_df.rdd.isEmpty():
-                first_row = filtered_df.first()
-                if first_row and "value" in first_row:
-                    return json.loads(first_row["value"])
-
-    except Exception:
-        # Log Redis connection errors but don't fail the operation
-        logger.exception(
-            f"Redis connection error for key {cache_key} in namespace {namespace}"
-        )
-
-    return None
+    return get_cached_value(namespace=namespace, cache_key=cache_key)
 
 
 def _store_in_cache(
-    spark: SparkSession,
     namespace: str,
     cache_key: str,
     data: List[Dict[str, Any]],
@@ -172,32 +156,7 @@ def _store_in_cache(
     """
     Store data in Redis cache.
     """
-    try:
-        table_name = f"{NAMESPACE_PREFIX}-{namespace}"
-
-        json_data = json.dumps(data)
-
-        cache_data = [(cache_key, json_data)]
-        cache_df = spark.createDataFrame(cache_data, ["cache_key", "value"])
-
-        # Write to Redis
-        (
-            cache_df.write.format("org.apache.spark.sql.redis")
-            .option("table", table_name)
-            .option("key.column", "cache_key")
-            .option("ttl", ttl)
-            .mode("append")
-            .save()
-        )
-
-        logger.debug(
-            f"Cached data under key {cache_key} in table {table_name} with TTL {ttl}s"
-        )
-    except Exception:
-        # Log the error but don't fail the operation if caching fails
-        logger.exception(
-            f"Failed to cache data under key {cache_key} in namespace {namespace}"
-        )
+    set_cached_value(namespace=namespace, cache_key=cache_key, data=data, ttl=ttl)
 
 
 def count_delta_table(
@@ -221,7 +180,7 @@ def count_delta_table(
     cache_key = _generate_cache_key(params)
 
     if use_cache:
-        cached_result = _get_from_cache(spark, namespace, cache_key)
+        cached_result = _get_from_cache(namespace, cache_key)
         if cached_result:
             logger.info(f"Cache hit for count on {database}.{table}")
             return cached_result[0]["count"]
@@ -234,7 +193,7 @@ def count_delta_table(
         logger.info(f"{full_table_name} has {count} rows.")
 
         if use_cache:
-            _store_in_cache(spark, namespace, cache_key, [{"count": count}])
+            _store_in_cache(namespace, cache_key, [{"count": count}])
 
         return count
     except Exception as e:
@@ -279,7 +238,7 @@ def sample_delta_table(
     cache_key = _generate_cache_key(params)
 
     if use_cache:
-        cached_result = _get_from_cache(spark, namespace, cache_key)
+        cached_result = _get_from_cache(namespace, cache_key)
         if cached_result:
             logger.info(f"Cache hit for sample on {database}.{table}")
             return cached_result
@@ -305,7 +264,7 @@ def sample_delta_table(
         logger.info(f"Sampled {len(results)} rows.")
 
         if use_cache:
-            _store_in_cache(spark, namespace, cache_key, results)
+            _store_in_cache(namespace, cache_key, results)
 
         return results
     except Exception as e:
@@ -334,7 +293,7 @@ def query_delta_table(
     cache_key = _generate_cache_key(params)
 
     if use_cache:
-        cached_result = _get_from_cache(spark, namespace, cache_key)
+        cached_result = _get_from_cache(namespace, cache_key)
         if cached_result:
             logger.info(
                 f"Cache hit for query: {query[:50]}{'...' if len(query) > 50 else ''}"
@@ -350,9 +309,382 @@ def query_delta_table(
         logger.info(f"Query returned {len(results)} rows.")
 
         if use_cache:
-            _store_in_cache(spark, namespace, cache_key, results)
+            _store_in_cache(namespace, cache_key, results)
 
         return results
     except Exception as e:
         logger.error(f"Error executing query: {e}")
         raise SparkOperationError(f"Failed to execute query: {str(e)}")
+
+
+# ---
+# Query Builder Functions
+# ---
+
+# Valid identifier pattern: alphanumeric and underscores only
+VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(name: str, identifier_type: str = "identifier") -> None:
+    """
+    Validate that an identifier (table, column, database name) is safe.
+
+    Args:
+        name: The identifier to validate.
+        identifier_type: Type of identifier for error messages.
+
+    Raises:
+        SparkQueryError: If the identifier is invalid.
+    """
+    if not name or not VALID_IDENTIFIER_PATTERN.match(name):
+        raise SparkQueryError(
+            f"Invalid {identifier_type}: '{name}'. "
+            "Identifiers must start with a letter or underscore and contain "
+            "only alphanumeric characters and underscores."
+        )
+
+
+def _escape_value(value: Any) -> str:
+    """
+    Escape a value for safe SQL use.
+
+    Args:
+        value: The value to escape.
+
+    Returns:
+        The escaped value as a SQL-safe string.
+    """
+    if value is None:
+        return "NULL"
+    elif isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        # Escape single quotes by doubling them
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    else:
+        # For other types, convert to string and escape
+        escaped = str(value).replace("'", "''")
+        return f"'{escaped}'"
+
+
+def _build_column_expression(col: ColumnSpec) -> str:
+    """
+    Build a column expression from a ColumnSpec.
+
+    Args:
+        col: The column specification.
+
+    Returns:
+        SQL column expression string.
+    """
+    parts = []
+
+    if col.table_alias:
+        _validate_identifier(col.table_alias, "table alias")
+        parts.append(f"`{col.table_alias}`.")
+
+    _validate_identifier(col.column, "column")
+    parts.append(f"`{col.column}`")
+
+    if col.alias:
+        _validate_identifier(col.alias, "column alias")
+        parts.append(f" AS `{col.alias}`")
+
+    return "".join(parts)
+
+
+def _build_aggregation_expression(agg: AggregationSpec) -> str:
+    """
+    Build an aggregation expression from an AggregationSpec.
+
+    Args:
+        agg: The aggregation specification.
+
+    Returns:
+        SQL aggregation expression string.
+    """
+    if agg.column == "*":
+        if agg.function != "COUNT":
+            raise SparkQueryError(
+                f"Aggregation function {agg.function} does not support '*'. "
+                "Only COUNT(*) is valid."
+            )
+        expr = "COUNT(*)"
+    else:
+        _validate_identifier(agg.column, "aggregation column")
+        expr = f"{agg.function}(`{agg.column}`)"
+
+    if agg.alias:
+        _validate_identifier(agg.alias, "aggregation alias")
+        expr += f" AS `{agg.alias}`"
+
+    return expr
+
+
+def _build_filter_condition(condition: FilterCondition) -> str:
+    """
+    Build a single filter condition for WHERE or HAVING clause.
+
+    Args:
+        condition: The filter condition specification.
+
+    Returns:
+        SQL condition string.
+    """
+    _validate_identifier(condition.column, "filter column")
+    col = f"`{condition.column}`"
+    op = condition.operator
+
+    if op in ("IS NULL", "IS NOT NULL"):
+        return f"{col} {op}"
+
+    elif op in ("IN", "NOT IN"):
+        if not condition.values:
+            raise SparkQueryError(f"Operator {op} requires 'values' to be provided")
+        escaped_values = [_escape_value(v) for v in condition.values]
+        values_str = ", ".join(escaped_values)
+        return f"{col} {op} ({values_str})"
+
+    elif op == "BETWEEN":
+        if not condition.values or len(condition.values) != 2:
+            raise SparkQueryError(
+                "Operator BETWEEN requires exactly 2 values in 'values'"
+            )
+        return (
+            f"{col} BETWEEN {_escape_value(condition.values[0])} "
+            f"AND {_escape_value(condition.values[1])}"
+        )
+
+    else:
+        # Standard comparison operators: =, !=, <, >, <=, >=, LIKE, NOT LIKE
+        if condition.value is None:
+            raise SparkQueryError(f"Operator {op} requires 'value' to be provided")
+        return f"{col} {op} {_escape_value(condition.value)}"
+
+
+def _build_filter_clause(
+    conditions: List[FilterCondition], clause_type: str = "WHERE"
+) -> str:
+    """
+    Build a WHERE or HAVING clause from filter conditions.
+
+    Args:
+        conditions: List of filter conditions.
+        clause_type: Either "WHERE" or "HAVING".
+
+    Returns:
+        SQL clause string (including the keyword) or empty string if no conditions.
+    """
+    if not conditions:
+        return ""
+
+    condition_strs = [_build_filter_condition(c) for c in conditions]
+    return f" {clause_type} " + " AND ".join(condition_strs)
+
+
+def _build_join_clause(join: JoinClause, main_table: str) -> str:
+    """
+    Build a JOIN clause.
+
+    Args:
+        join: The join specification.
+        main_table: The name of the main table for the ON clause.
+
+    Returns:
+        SQL JOIN clause string.
+    """
+    _validate_identifier(join.database, "join database")
+    _validate_identifier(join.table, "join table")
+    _validate_identifier(join.on_left_column, "join left column")
+    _validate_identifier(join.on_right_column, "join right column")
+
+    join_table = f"`{join.database}`.`{join.table}`"
+    join_type = join.join_type
+
+    return (
+        f" {join_type} JOIN {join_table} "
+        f"ON `{main_table}`.`{join.on_left_column}` = "
+        f"`{join.table}`.`{join.on_right_column}`"
+    )
+
+
+def build_select_query(
+    request: TableSelectRequest, include_pagination: bool = True
+) -> str:
+    """
+    Build a SQL SELECT query from a TableSelectRequest.
+
+    Args:
+        request: The structured select request.
+        include_pagination: Whether to include LIMIT/OFFSET clauses.
+
+    Returns:
+        The constructed SQL query string.
+    """
+    _validate_identifier(request.database, "database")
+    _validate_identifier(request.table, "table")
+
+    # Build SELECT clause
+    select_parts = []
+
+    # Add DISTINCT keyword if requested
+    distinct_keyword = "DISTINCT " if request.distinct else ""
+
+    # Add columns
+    if request.columns:
+        select_parts.extend([_build_column_expression(c) for c in request.columns])
+
+    # Add aggregations
+    if request.aggregations:
+        select_parts.extend(
+            [_build_aggregation_expression(a) for a in request.aggregations]
+        )
+
+    # If no columns or aggregations, select all
+    if not select_parts:
+        select_clause = f"SELECT {distinct_keyword}*"
+    else:
+        select_clause = f"SELECT {distinct_keyword}" + ", ".join(select_parts)
+
+    # Build FROM clause
+    main_table = f"`{request.database}`.`{request.table}`"
+    from_clause = f" FROM {main_table}"
+
+    # Build JOIN clauses
+    join_clauses = ""
+    if request.joins:
+        for join in request.joins:
+            # Validate join table exists
+            _check_exists(join.database, join.table)
+            join_clauses += _build_join_clause(join, request.table)
+
+    # Build WHERE clause
+    where_clause = (
+        _build_filter_clause(request.filters, "WHERE") if request.filters else ""
+    )
+
+    # Build GROUP BY clause
+    group_by_clause = ""
+    if request.group_by:
+        for col in request.group_by:
+            _validate_identifier(col, "group by column")
+        group_by_cols = ", ".join([f"`{col}`" for col in request.group_by])
+        group_by_clause = f" GROUP BY {group_by_cols}"
+
+    # Build HAVING clause
+    having_clause = (
+        _build_filter_clause(request.having, "HAVING") if request.having else ""
+    )
+
+    # Build ORDER BY clause
+    order_by_clause = ""
+    if request.order_by:
+        order_parts = []
+        for order in request.order_by:
+            _validate_identifier(order.column, "order by column")
+            order_parts.append(f"`{order.column}` {order.direction}")
+        order_by_clause = " ORDER BY " + ", ".join(order_parts)
+
+    # Build LIMIT/OFFSET clause
+    pagination_clause = ""
+    if include_pagination:
+        pagination_clause = f" LIMIT {request.limit} OFFSET {request.offset}"
+
+    # Combine all parts
+    query = (
+        select_clause
+        + from_clause
+        + join_clauses
+        + where_clause
+        + group_by_clause
+        + having_clause
+        + order_by_clause
+        + pagination_clause
+    )
+
+    return query
+
+
+def select_from_delta_table(
+    spark: SparkSession, request: TableSelectRequest, use_cache: bool = True
+) -> TableSelectResponse:
+    """
+    Execute a structured SELECT query against Delta tables with pagination.
+
+    Args:
+        spark: The SparkSession object.
+        request: The structured select request.
+        use_cache: Whether to use the redis cache to store the result.
+
+    Returns:
+        TableSelectResponse with data and pagination info.
+    """
+    namespace = "select"
+
+    # Generate cache key from request parameters
+    params = request.model_dump()
+    cache_key = _generate_cache_key(params)
+
+    if use_cache:
+        cached_result = _get_from_cache(namespace, cache_key)
+        if cached_result:
+            logger.info(f"Cache hit for select on {request.database}.{request.table}")
+            # Reconstruct response from cached data
+            return TableSelectResponse(
+                data=cached_result[0]["data"],
+                pagination=PaginationInfo(**cached_result[0]["pagination"]),
+            )
+
+    # Validate main table exists
+    _check_exists(request.database, request.table)
+
+    # Build and execute count query (without pagination) for total count
+    count_query = f"SELECT COUNT(*) as cnt FROM ({build_select_query(request, include_pagination=False)})"
+    logger.info(f"Executing count query: {count_query}")
+
+    try:
+        count_result = spark.sql(count_query).collect()
+        total_count = count_result[0]["cnt"]
+    except Exception as e:
+        logger.error(f"Error executing count query: {e}")
+        raise SparkOperationError(f"Failed to execute count query: {str(e)}")
+
+    # Build and execute main query with pagination
+    main_query = build_select_query(request, include_pagination=True)
+    logger.info(f"Executing select query: {main_query}")
+
+    try:
+        df = spark.sql(main_query)
+        results = [row.asDict() for row in df.collect()]
+        logger.info(f"Select query returned {len(results)} rows.")
+
+        # Calculate pagination info
+        has_more = (request.offset + len(results)) < total_count
+
+        pagination = PaginationInfo(
+            limit=request.limit,
+            offset=request.offset,
+            total_count=total_count,
+            has_more=has_more,
+        )
+
+        response = TableSelectResponse(data=results, pagination=pagination)
+
+        if use_cache:
+            # Store serializable version in cache
+            cache_data = [
+                {
+                    "data": results,
+                    "pagination": pagination.model_dump(),
+                }
+            ]
+            _store_in_cache(namespace, cache_key, cache_data)
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Error executing select query: {e}")
+        raise SparkOperationError(f"Failed to execute select query: {str(e)}")
