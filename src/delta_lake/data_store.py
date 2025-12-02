@@ -71,7 +71,10 @@ def _extract_databases_from_paths(paths: List[str]) -> List[str]:
     databases = set()
     for path in paths:
         # Only process paths from SQL warehouses
-        if not any(warehouse in path for warehouse in ["/users-sql-warehouse/", "/tenant-sql-warehouse/"]):
+        if not any(
+            warehouse in path
+            for warehouse in ["/users-sql-warehouse/", "/tenant-sql-warehouse/"]
+        ):
             continue
 
         # Remove s3a:// prefix and split by /
@@ -253,7 +256,9 @@ def get_databases(
 
             if prefixes:
                 # Filter databases by namespace prefixes (owned + group databases)
-                owned_databases = [db for db in databases if db.startswith(tuple(prefixes))]
+                owned_databases = [
+                    db for db in databases if db.startswith(tuple(prefixes))
+                ]
                 logger.info(
                     f"Found {len(owned_databases)} owned/group databases matching {len(prefixes)} prefix(es)"
                 )
@@ -265,7 +270,9 @@ def get_databases(
             # These are databases shared with the user that don't match their namespace
             accessible_paths = _get_accessible_paths(auth_token)
             shared_databases = _extract_databases_from_paths(accessible_paths)
-            logger.info(f"Found {len(shared_databases)} shared databases from accessible paths")
+            logger.info(
+                f"Found {len(shared_databases)} shared databases from accessible paths"
+            )
 
             # Combine owned and shared, remove duplicates
             all_accessible = set(owned_databases) | set(shared_databases)
