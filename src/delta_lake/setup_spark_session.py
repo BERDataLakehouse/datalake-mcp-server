@@ -430,7 +430,6 @@ def get_spark_session(
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     if not local and not use_spark_connect:
-        spark.sparkContext.setLogLevel("DEBUG")
         _set_scheduler_pool(spark, scheduler_pool)
 
     return spark
