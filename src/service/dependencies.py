@@ -5,6 +5,7 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
+import signal
 from pathlib import Path
 from typing import Annotated, Generator
 
@@ -226,11 +227,19 @@ def get_spark_session(
             "BERDL_POD_IP": settings.BERDL_POD_IP,
         }
 
-        # Try Spark Connect first
+        # Try Spark Connect first with timeout
         spark_connect_url = construct_user_spark_connect_url(username)
         logger.info(f"Attempting to connect via Spark Connect: {spark_connect_url}")
 
+        # Set a timeout for Spark Connect connection attempts (5 seconds)
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Spark Connect connection timed out")
+
         try:
+            # Set timeout alarm (Unix only)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(5)  # 5 second timeout
+
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
                 **base_user_settings,
@@ -241,6 +250,9 @@ def get_spark_session(
                 settings=user_settings,
                 use_spark_connect=True,
             )
+
+            # Cancel the alarm if successful
+            signal.alarm(0)
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
