@@ -417,28 +417,16 @@ def get_spark_session(
     # For legacy (non-Connect) mode, we must ensure SPARK_REMOTE is not set
     # PySpark 3.5+ checks this env var and will try to use Connect mode if set,
     # even when spark.remote is not in the config
-    saved_spark_remote = None
     if not use_spark_connect:
-        saved_spark_remote = os.environ.pop("SPARK_REMOTE", None)
-        if saved_spark_remote:
-            logger.info(
-                f"Temporarily cleared SPARK_REMOTE env var (was: {saved_spark_remote})"
-            )
-        # Also ensure spark.remote is explicitly NOT in the config
+        os.environ.pop("SPARK_REMOTE", None)
         config.pop("spark.remote", None)
 
-    try:
-        spark_conf = SparkConf().setAll(list(config.items()))
-        spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
+    spark_conf = SparkConf().setAll(list(config.items()))
+    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
 
-        # Post-creation configuration (only for legacy mode with SparkContext)
-        if not local and not use_spark_connect:
-            spark.sparkContext.setLogLevel("DEBUG")
-            _set_scheduler_pool(spark, scheduler_pool)
+    # Post-creation configuration (only for legacy mode with SparkContext)
+    if not local and not use_spark_connect:
+        spark.sparkContext.setLogLevel("DEBUG")
+        _set_scheduler_pool(spark, scheduler_pool)
 
-        return spark
-    finally:
-        # Restore SPARK_REMOTE if it was set
-        if saved_spark_remote is not None:
-            os.environ["SPARK_REMOTE"] = saved_spark_remote
-            logger.info(f"Restored SPARK_REMOTE env var to: {saved_spark_remote}")
+    return spark
