@@ -5,7 +5,7 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
-import signal
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Annotated, Generator
 
@@ -231,38 +231,43 @@ def get_spark_session(
         spark_connect_url = construct_user_spark_connect_url(username)
         logger.info(f"Attempting to connect via Spark Connect: {spark_connect_url}")
 
-        # Set a timeout for Spark Connect connection attempts (5 seconds)
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Spark Connect connection timed out")
-
-        try:
-            # Set timeout alarm (Unix only)
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
-
+        def try_spark_connect():
+            """Attempt Spark Connect connection (runs in separate thread for timeout)."""
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
                 **base_user_settings,
             )
-
-            spark = _get_spark_session(
+            return _get_spark_session(
                 app_name=f"datalake_mcp_server_{username}",
                 settings=user_settings,
                 use_spark_connect=True,
             )
 
-            # Cancel the alarm if successful
-            signal.alarm(0)
+        connect_error = None
+        try:
+            # Use ThreadPoolExecutor to enforce timeout on connection attempt
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(try_spark_connect)
+                # Wait up to 5 seconds for Spark Connect to respond
+                spark = future.result(timeout=5.0)
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
-        except Exception as connect_error:
+        except FuturesTimeoutError as e:
             logger.warning(
-                f"Spark Connect unavailable for user {username}: {connect_error}"
+                f"Spark Connect connection timed out after 5 seconds for user {username}"
             )
-            logger.info("Falling back to shared Spark cluster...")
+            connect_error = e
 
-            # Fall back to shared Spark cluster
+        except Exception as e:
+            logger.warning(
+                f"Spark Connect unavailable for user {username}: {e}"
+            )
+            connect_error = e
+
+        # If Spark Connect failed, fall back to shared Spark cluster
+        if connect_error is not None:
+            logger.info("Falling back to shared Spark cluster...")
             try:
                 # Use shared cluster master URL
                 shared_master_url = os.getenv(
@@ -270,10 +275,11 @@ def get_spark_session(
                     "spark://sharedsparkclustermaster.prod:7077",
                 )
 
-                fallback_settings = BERDLSettings(
-                    SPARK_MASTER_URL=AnyUrl(shared_master_url),
-                    **base_user_settings,
-                )
+                # Create fallback settings with updated SPARK_MASTER_URL
+                fallback_settings_dict = base_user_settings.copy()
+                fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
+
+                fallback_settings = BERDLSettings(**fallback_settings_dict)
 
                 spark = _get_spark_session(
                     app_name=f"datalake_mcp_server_{username}_shared",
