@@ -13,6 +13,7 @@ When updating, copy the file and adapt the imports and warehouse configuration.
 import logging
 import os
 import socket
+import threading
 import warnings
 from datetime import datetime
 from typing import Any
@@ -23,6 +24,15 @@ from src.settings import BERDLSettings, get_settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# THREAD SAFETY
+# =============================================================================
+# Global lock to prevent race conditions during Spark session creation.
+# PySpark's SparkSession.builder.getOrCreate() is NOT thread-safe and manipulates
+# global state (environment variables, builder._options). Without this lock,
+# concurrent requests can cause undefined behavior and deadlocks.
+_spark_session_lock = threading.Lock()
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
 warnings.filterwarnings(
@@ -460,34 +470,43 @@ def get_spark_session(
         config.update(override)
 
     # ==========================================================================
-    # CRITICAL: Clean environment before creating session
+    # CRITICAL: Thread-safe session creation
     # ==========================================================================
-    # PySpark 3.4+ uses environment variables to determine mode. These persist
-    # across sessions and cause conflicts when switching between Connect and
-    # legacy mode within the same process:
+    # PySpark's SparkSession.builder is NOT thread-safe. The following operations
+    # must be performed atomically to prevent race conditions:
     #
-    # 1. SPARK_CONNECT_MODE_ENABLED - Set when Connect is used, forces Connect mode
-    # 2. SPARK_REMOTE - Spark Connect URL
-    # 3. SPARK_LOCAL_REMOTE - Local Connect server flag
-    # 4. MASTER - Legacy master URL
+    # 1. Clearing environment variables (os.environ modifications)
+    # 2. Clearing builder._options
+    # 3. Creating SparkConf and calling getOrCreate()
     #
-    # Without clearing these, PySpark will try to use the wrong mode.
+    # Without this lock, concurrent requests can cause:
+    # - Environment variable corruption between threads
+    # - Builder options being modified mid-creation
+    # - Undefined behavior leading to service hangs
     # ==========================================================================
-    _clear_spark_env_for_mode_switch(use_spark_connect)
+    with _spark_session_lock:
+        logger.debug("Acquired Spark session creation lock")
 
-    # Clear builder's cached options to prevent conflicts
-    builder = SparkSession.builder
-    if hasattr(builder, "_options"):
-        builder._options.clear()
+        # Clean environment before creating session
+        # PySpark 3.4+ uses environment variables to determine mode
+        _clear_spark_env_for_mode_switch(use_spark_connect)
 
-    # Use loadDefaults=False to prevent SparkConf from inheriting configuration
-    # from any existing JVM (e.g., spark.master from a previous session).
-    spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
+        # Clear builder's cached options to prevent conflicts
+        builder = SparkSession.builder
+        if hasattr(builder, "_options"):
+            builder._options.clear()
 
-    # Use the same builder instance that we cleared
-    spark = builder.config(conf=spark_conf).getOrCreate()
+        # Use loadDefaults=False to prevent SparkConf from inheriting configuration
+        # from any existing JVM (e.g., spark.master from a previous session).
+        spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
+
+        # Use the same builder instance that we cleared
+        spark = builder.config(conf=spark_conf).getOrCreate()
+
+        logger.debug("Spark session created, releasing lock")
 
     # Post-creation configuration (only for legacy mode with SparkContext)
+    # This can be done outside the lock as it operates on the session instance
     if not local and not use_spark_connect:
         _set_scheduler_pool(spark, scheduler_pool)
 

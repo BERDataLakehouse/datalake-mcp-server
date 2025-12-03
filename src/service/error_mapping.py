@@ -26,12 +26,14 @@ from src.service.exceptions import (
     SparkOperationError,
     SparkQueryError,
     SparkSessionError,
+    SparkTimeoutError,
 )
 
 _H400 = status.HTTP_400_BAD_REQUEST
 _H401 = status.HTTP_401_UNAUTHORIZED
 _H403 = status.HTTP_403_FORBIDDEN
 _H404 = status.HTTP_404_NOT_FOUND
+_H408 = status.HTTP_408_REQUEST_TIMEOUT
 _H503 = status.HTTP_503_SERVICE_UNAVAILABLE
 
 
@@ -65,6 +67,7 @@ _ERR_MAP = {
     SparkSessionError: ErrorMapping(ErrorType.SPARK_SESSION_ERROR, _H503),
     SparkOperationError: ErrorMapping(ErrorType.SPARK_OPERATION_ERROR, _H503),
     SparkQueryError: ErrorMapping(ErrorType.SPARK_QUERY_ERROR, _H400),
+    SparkTimeoutError: ErrorMapping(ErrorType.SPARK_TIMEOUT_ERROR, _H408),
     # Base error fallback
     MCPServerError: ErrorMapping(None, status.HTTP_500_INTERNAL_SERVER_ERROR),
 }

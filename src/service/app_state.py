@@ -62,7 +62,12 @@ async def destroy_app_state(app: FastAPI) -> None:
     Args:
         app: The FastAPI app.
     """
-    # Currently no resources need to be explicitly cleaned up
+    # Close the KBaseAuth HTTP session to release connection pool resources
+    if hasattr(app.state, "_auth") and app.state._auth:
+        logger.info("Closing KBaseAuth HTTP session...")
+        await app.state._auth.close()
+
+    # Allow pending async tasks to complete
     # https://docs.aiohttp.org/en/stable/client_advanced.html#graceful-shutdown
     await asyncio.sleep(0.250)
     logger.info("Application state destroyed")

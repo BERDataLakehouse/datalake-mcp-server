@@ -97,3 +97,28 @@ class DeltaTableOperationError(DeltaLakeError):
     """
     An error thrown when an operation on a Delta table fails.
     """
+
+
+class SparkTimeoutError(SparkOperationError):
+    """
+    An error thrown when a Spark operation exceeds its timeout.
+
+    This typically indicates a query that is too expensive or a system
+    that is under heavy load.
+    """
+
+    def __init__(
+        self,
+        operation: str = "spark_operation",
+        timeout: float = 0,
+        message: str | None = None,
+    ):
+        self.operation = operation
+        self.timeout = timeout
+        if message:
+            super().__init__(message)
+        else:
+            super().__init__(
+                f"Spark operation '{operation}' timed out after {timeout} seconds. "
+                f"Consider using pagination or reducing the query scope."
+            )

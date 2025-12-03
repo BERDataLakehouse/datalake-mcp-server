@@ -15,6 +15,8 @@ from cacheout.lru import LRUCache
 from src.service.arg_checkers import not_falsy as _not_falsy
 from src.service.exceptions import InvalidTokenError, MissingRoleError
 
+logger = logging.getLogger(__name__)
+
 
 class AdminPermission(IntEnum):
     """
@@ -31,15 +33,8 @@ class KBaseUser(NamedTuple):
     admin_perm: AdminPermission
 
 
-async def _get(url, headers):
-    # TODO PERF keep a single session and add a close method
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as r:
-            await _check_error(r)
-            return await r.json()
-
-
-async def _check_error(r):
+async def _check_error(r: aiohttp.ClientResponse) -> None:
+    """Check for errors in the response from the auth server."""
     if r.status != 200:
         try:
             j = await r.json()
@@ -47,7 +42,7 @@ async def _check_error(r):
             err = "Non-JSON response from KBase auth server, status code: " + str(
                 r.status
             )
-            logging.getLogger(__name__).info("%s, response:\n%s", err, r.text)
+            logger.info("%s, response:\n%s", err, await r.text())
             raise IOError(err)
         # assume that if we get json then at least this is the auth server and we can
         # rely on the error structure.
@@ -59,7 +54,12 @@ async def _check_error(r):
 
 
 class KBaseAuth:
-    """A client for contacting the KBase authentication server."""
+    """
+    A client for contacting the KBase authentication server.
+
+    Uses a shared aiohttp.ClientSession for connection pooling and efficiency.
+    The session should be closed via close() when the application shuts down.
+    """
 
     @classmethod
     async def create(
@@ -72,25 +72,56 @@ class KBaseAuth:
     ) -> Self:
         """
         Create the client.
-        auth_url - The root url of the authentication service.
-        required_roles - The KBase Auth2 roles that the user must possess in order to be allowed
-            to use the service.
-        full_admin_roles -  The KBase Auth2 roles that determine that user is an administrator.
-        cache_max_size -  the maximum size of the token cache.
-        cache_expiration -  the expiration time for the token cache in
-            seconds.
+
+        Args:
+            auth_url: The root url of the authentication service.
+            required_roles: The KBase Auth2 roles that the user must possess
+                in order to be allowed to use the service.
+            full_admin_roles: The KBase Auth2 roles that determine that user
+                is an administrator.
+            cache_max_size: The maximum size of the token cache.
+            cache_expiration: The expiration time for the token cache in seconds.
+
+        Returns:
+            A configured KBaseAuth instance with a shared HTTP session.
         """
         if not _not_falsy(auth_url, "auth_url").endswith("/"):
             auth_url += "/"
-        j = await _get(auth_url, {"Accept": "application/json"})
-        return cls(
-            auth_url,
-            required_roles,
-            full_admin_roles,
-            cache_max_size,
-            cache_expiration,
-            j.get("servicename"),
+
+        # Create the shared session with reasonable defaults
+        # Connection pooling is handled automatically by aiohttp
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        connector = aiohttp.TCPConnector(
+            limit=100,  # Max connections in pool
+            limit_per_host=20,  # Max connections per host
+            ttl_dns_cache=300,  # DNS cache TTL in seconds
         )
+        session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector,
+        )
+
+        try:
+            # Verify the auth service is reachable and valid
+            async with session.get(
+                auth_url, headers={"Accept": "application/json"}
+            ) as r:
+                await _check_error(r)
+                j = await r.json()
+
+            return cls(
+                auth_url,
+                required_roles,
+                full_admin_roles,
+                cache_max_size,
+                cache_expiration,
+                j.get("servicename"),
+                session,
+            )
+        except Exception:
+            # Clean up session if initialization fails
+            await session.close()
+            raise
 
     def __init__(
         self,
@@ -100,17 +131,17 @@ class KBaseAuth:
         cache_max_size: int,
         cache_expiration: int,
         service_name: str,
+        session: aiohttp.ClientSession,
     ):
         self._url = auth_url
         self._me_url = self._url + "api/V2/me"
         self._req_roles = set(required_roles) if required_roles else None
         self._full_roles = set(full_admin_roles) if full_admin_roles else set()
-        self._cache_timer = (
-            time.time
-        )  # TODO TEST figure out how to replace the timer to test
+        self._cache_timer = time.time
         self._cache = LRUCache(
             timer=self._cache_timer, maxsize=cache_max_size, ttl=cache_expiration
         )
+        self._session = session
 
         if service_name != "Authentication Service":
             raise IOError(
@@ -118,35 +149,73 @@ class KBaseAuth:
                 + "Authentication Service"
             )
 
-        # could use the server time to adjust for clock skew, probably not worth the trouble
+        logger.info("KBaseAuth initialized with shared HTTP session")
+
+    async def close(self) -> None:
+        """
+        Close the shared HTTP session.
+
+        Should be called during application shutdown to cleanly release resources.
+        """
+        if self._session and not self._session.closed:
+            await self._session.close()
+            logger.info("KBaseAuth HTTP session closed")
+
+    async def _get(self, url: str, headers: dict) -> dict:
+        """
+        Make a GET request using the shared session.
+
+        Args:
+            url: The URL to request
+            headers: Request headers
+
+        Returns:
+            JSON response as dictionary
+
+        Raises:
+            IOError: If the request fails or returns an error
+            InvalidTokenError: If the token is invalid
+        """
+        async with self._session.get(url, headers=headers) as r:
+            await _check_error(r)
+            return await r.json()
 
     async def get_user(self, token: str) -> KBaseUser:
         """
         Get a username from a token as well as the user's administration status.
+
         Verifies the user has all the required roles set in the create() method.
 
-        token - The user's token.
+        Args:
+            token: The user's token.
 
-        Returns the user.
+        Returns:
+            The authenticated user with their admin permission level.
+
+        Raises:
+            InvalidTokenError: If the token is invalid.
+            MissingRoleError: If the user lacks required roles.
         """
-        # TODO CODE should check the token for \n etc.
         _not_falsy(token, "token")
 
         admin_cache = self._cache.get(token, default=False)
         if admin_cache:
             return KBaseUser(admin_cache[0], admin_cache[1])
-        j = await _get(self._me_url, {"Authorization": token})
+
+        j = await self._get(self._me_url, {"Authorization": token})
         croles = set(j["customroles"])
+
         if self._req_roles and not self._req_roles <= croles:
             required_roles_str = ", ".join(sorted(self._req_roles))
             raise MissingRoleError(
                 f"The user is missing required authentication roles to use the service. Required roles: {required_roles_str}"
             )
+
         v = (j["user"], self._get_admin_role(croles))
         self._cache.set(token, v)
         return KBaseUser(v[0], v[1])
 
-    def _get_admin_role(self, roles: set[str]):
+    def _get_admin_role(self, roles: set[str]) -> AdminPermission:
         if roles & self._full_roles:
             return AdminPermission.FULL
         return AdminPermission.NONE
