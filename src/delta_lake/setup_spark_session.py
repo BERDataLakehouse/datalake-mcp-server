@@ -423,8 +423,14 @@ def get_spark_session(
     if hasattr(builder, "_options"):
         builder._options.clear()
 
-    spark_conf = SparkConf().setAll(list(config.items()))
-    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
+    # CRITICAL: Use loadDefaults=False to prevent SparkConf from inheriting
+    # configuration from any existing JVM (e.g., spark.master from a previous session).
+    # Without this, switching from standalone to Connect mode fails because the old
+    # spark.master value is inherited from the JVM.
+    spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
+
+    # Use the same builder instance that we cleared (not SparkSession.builder which creates a new one)
+    spark = builder.config(conf=spark_conf).getOrCreate()
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     if not local and not use_spark_connect:
