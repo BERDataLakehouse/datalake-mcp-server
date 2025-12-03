@@ -10,14 +10,19 @@ MAINTENANCE NOTE: This file is copied from:
 When updating, copy the file and adapt the imports and warehouse configuration.
 """
 
+import logging
+import os
+import socket
 import warnings
 from datetime import datetime
 from typing import Any
 
 from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
-
 from src.settings import BERDLSettings, get_settings
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
 warnings.filterwarnings(
@@ -138,11 +143,14 @@ def _get_executor_conf(
     if use_spark_connect:
         conf_base = {"spark.remote": str(settings.SPARK_CONNECT_URL)}
     else:
-        # Legacy mode: add driver/executor configs
+        driver_host = socket.gethostbyname(socket.gethostname())
+
         conf_base = {
-            "spark.driver.host": settings.BERDL_POD_IP,
+            "spark.driver.host": driver_host,
+            "spark.driver.bindAddress": "0.0.0.0",  # Bind to all interfaces
             "spark.master": str(settings.SPARK_MASTER_URL),
         }
+        logger.info(f"Legacy mode: driver.host={driver_host}, bindAddress=0.0.0.0")
 
     return {
         **conf_base,
@@ -293,6 +301,47 @@ def _set_scheduler_pool(spark: SparkSession, scheduler_pool: str) -> None:
     spark.sparkContext.setLocalProperty("spark.scheduler.pool", scheduler_pool)
 
 
+def _clear_spark_env_for_mode_switch(use_spark_connect: bool) -> None:
+    """
+    Clear PySpark environment variables to allow clean mode switching.
+
+    PySpark 3.4+ uses several environment variables to determine whether to use
+    Spark Connect or classic mode. These persist across sessions and can cause
+    conflicts when switching modes within the same process.
+
+    Environment variables managed:
+    - SPARK_CONNECT_MODE_ENABLED: Set to "1" when Connect mode is used
+    - SPARK_REMOTE: Spark Connect URL
+    - SPARK_LOCAL_REMOTE: Set when using local Connect server
+    - MASTER: Spark master URL (classic mode)
+    - SPARK_API_MODE: Can be "classic" or "connect"
+
+    Args:
+        use_spark_connect: If True, clears legacy mode vars; if False, clears Connect vars
+    """
+    if use_spark_connect:
+        # Switching TO Spark Connect: clear legacy mode variables
+        env_vars_to_clear = ["MASTER"]
+        logger.debug(
+            f"Clearing legacy mode env vars for Spark Connect: {env_vars_to_clear}"
+        )
+    else:
+        # Switching TO legacy mode: clear ALL Spark Connect related variables
+        env_vars_to_clear = [
+            "SPARK_CONNECT_MODE_ENABLED",  # Critical: forces Connect mode if present
+            "SPARK_REMOTE",  # Connect URL
+            "SPARK_LOCAL_REMOTE",  # Local Connect server flag
+        ]
+        logger.debug(
+            f"Clearing Connect mode env vars for legacy mode: {env_vars_to_clear}"
+        )
+
+    for var in env_vars_to_clear:
+        if var in os.environ:
+            logger.info(f"Clearing environment variable: {var}={os.environ[var]}")
+            del os.environ[var]
+
+
 def generate_spark_conf(
     app_name: str | None = None,
     local: bool = False,
@@ -307,7 +356,7 @@ def generate_spark_conf(
     # Generate app name if not provided
     if app_name is None:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        app_name = f"kbase_spark_session_{timestamp}_{settings.USER}"
+        app_name = f"kbase_spark_session_{timestamp}"
 
     # Build common configuration dictionary
     config: dict[str, str] = {"spark.app.name": app_name}
@@ -410,12 +459,36 @@ def get_spark_session(
     if override:
         config.update(override)
 
-    spark_conf = SparkConf().setAll(list(config.items()))
-    spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
+    # ==========================================================================
+    # CRITICAL: Clean environment before creating session
+    # ==========================================================================
+    # PySpark 3.4+ uses environment variables to determine mode. These persist
+    # across sessions and cause conflicts when switching between Connect and
+    # legacy mode within the same process:
+    #
+    # 1. SPARK_CONNECT_MODE_ENABLED - Set when Connect is used, forces Connect mode
+    # 2. SPARK_REMOTE - Spark Connect URL
+    # 3. SPARK_LOCAL_REMOTE - Local Connect server flag
+    # 4. MASTER - Legacy master URL
+    #
+    # Without clearing these, PySpark will try to use the wrong mode.
+    # ==========================================================================
+    _clear_spark_env_for_mode_switch(use_spark_connect)
+
+    # Clear builder's cached options to prevent conflicts
+    builder = SparkSession.builder
+    if hasattr(builder, "_options"):
+        builder._options.clear()
+
+    # Use loadDefaults=False to prevent SparkConf from inheriting configuration
+    # from any existing JVM (e.g., spark.master from a previous session).
+    spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
+
+    # Use the same builder instance that we cleared
+    spark = builder.config(conf=spark_conf).getOrCreate()
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     if not local and not use_spark_connect:
-        spark.sparkContext.setLogLevel("DEBUG")
         _set_scheduler_pool(spark, scheduler_pool)
 
     return spark

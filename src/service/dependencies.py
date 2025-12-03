@@ -5,8 +5,11 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
+import socket
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Generator
+from urllib.parse import urlparse
 
 from fastapi import Depends, Request
 from pydantic import AnyUrl
@@ -146,6 +149,41 @@ def construct_user_spark_connect_url(username: str) -> str:
     return url
 
 
+def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 1.0) -> bool:
+    """
+    Quick TCP check if Spark Connect server is reachable.
+
+    Args:
+        spark_connect_url: Spark Connect URL (e.g., "sc://jupyter-user.namespace:15002")
+        timeout: Connection timeout in seconds (default: 1.0)
+
+    Returns:
+        True if port is reachable, False otherwise
+    """
+    try:
+        # Parse URL to extract host and port
+        # Format: sc://host:port
+        url_str = spark_connect_url.replace("sc://", "tcp://")
+        parsed = urlparse(url_str)
+        host = parsed.hostname
+        port = parsed.port or 15002  # Default Spark Connect port
+
+        if not host:
+            logger.debug(f"Failed to parse hostname from URL: {spark_connect_url}")
+            return False
+
+        # Attempt TCP connection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+
+        return result == 0
+    except Exception as e:
+        logger.debug(f"TCP check failed for {spark_connect_url}: {e}")
+        return False
+
+
 def get_spark_session(
     request: Request,
     settings: Annotated[BERDLSettings, Depends(get_settings)],
@@ -226,11 +264,15 @@ def get_spark_session(
             "BERDL_POD_IP": settings.BERDL_POD_IP,
         }
 
-        # Try Spark Connect first
+        # Try Spark Connect first with TCP pre-flight check
         spark_connect_url = construct_user_spark_connect_url(username)
-        logger.info(f"Attempting to connect via Spark Connect: {spark_connect_url}")
+        logger.info(f"Checking Spark Connect availability: {spark_connect_url}")
 
-        try:
+        # Quick TCP check to see if Spark Connect port is reachable
+        if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
+            logger.info(
+                f"Spark Connect port reachable, attempting connection: {spark_connect_url}"
+            )
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
                 **base_user_settings,
@@ -243,48 +285,40 @@ def get_spark_session(
             )
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
+        else:
+            logger.info("Spark Connect port unreachable, using shared Spark cluster")
 
-        except Exception as connect_error:
-            logger.warning(
-                f"Spark Connect unavailable for user {username}: {connect_error}"
+            # Use shared cluster master URL
+            shared_master_url = os.getenv(
+                "SHARED_SPARK_MASTER_URL",
+                "spark://sharedsparkclustermaster.prod:7077",
             )
-            logger.info("Falling back to shared Spark cluster...")
 
-            # Fall back to shared Spark cluster
-            try:
-                # Use shared cluster master URL
-                shared_master_url = os.getenv(
-                    "SHARED_SPARK_MASTER_URL",
-                    "spark://sharedsparkclustermaster.prod:7077",
-                )
-
-                fallback_settings = BERDLSettings(
-                    SPARK_MASTER_URL=AnyUrl(shared_master_url),
-                    **base_user_settings,
+            # Create fallback settings with updated SPARK_MASTER_URL
+            fallback_settings_dict = base_user_settings.copy()
+            fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
+            # Use a dummy connect URL to satisfy Pydantic validation
+            fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl("sc://localhost:15002")
+            # Ensure BERDL_POD_IP is set for legacy mode
+            if not fallback_settings_dict.get("BERDL_POD_IP"):
+                fallback_settings_dict["BERDL_POD_IP"] = (
+                    "0.0.0.0"  # Let Spark auto-detect
                 )
 
-                spark = _get_spark_session(
-                    app_name=f"datalake_mcp_server_{username}_shared",
-                    settings=fallback_settings,
-                    use_spark_connect=False,
-                )
+            fallback_settings = BERDLSettings(**fallback_settings_dict)
 
-                logger.info(
-                    f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
-                )
+            # Note: SPARK_REMOTE env var handling is done within _get_spark_session
+            # when use_spark_connect=False to ensure it's cleared at the right time
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            spark = _get_spark_session(
+                app_name=f"datalake_mcp_server_{username}_{timestamp}",
+                settings=fallback_settings,
+                use_spark_connect=False,
+            )
 
-            except Exception as cluster_error:
-                logger.error(
-                    f"Both Spark Connect and shared cluster failed for user {username}"
-                )
-                logger.error(f"Spark Connect error: {connect_error}")
-                logger.error(f"Shared cluster error: {cluster_error}")
-                raise Exception(
-                    f"Unable to create Spark session for user {username}. "
-                    f"Spark Connect unavailable: {connect_error}. "
-                    f"Shared cluster unavailable: {cluster_error}. "
-                    f"Please contact a BERDL administrator."
-                )
+            logger.info(
+                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
+            )
 
         # Yield the spark session to the endpoint
         logger.debug("Spark session created, yielding to endpoint")
