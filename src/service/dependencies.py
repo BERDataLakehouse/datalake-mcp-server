@@ -5,7 +5,6 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Generator
 
