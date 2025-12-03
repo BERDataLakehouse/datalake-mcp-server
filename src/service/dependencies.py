@@ -260,9 +260,7 @@ def get_spark_session(
             connect_error = e
 
         except Exception as e:
-            logger.warning(
-                f"Spark Connect unavailable for user {username}: {e}"
-            )
+            logger.warning(f"Spark Connect unavailable for user {username}: {e}")
             connect_error = e
 
         # If Spark Connect failed, fall back to shared Spark cluster
