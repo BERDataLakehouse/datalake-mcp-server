@@ -714,24 +714,26 @@ class TestConcurrentRequests:
     def test_concurrent_different_endpoints(self, concurrent_executor):
         """Test concurrent requests to different endpoints."""
 
+        # Create a single app instance outside the concurrent function
+        # to avoid re-triggering module initialization
+        app = FastAPI()
+        app.include_router(router)
+
+        spark = MagicMock()
+        user = KBaseUser(user="testuser", admin_perm=AdminPermission.NONE)
+
+        def mock_get_spark():
+            yield spark
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_session] = mock_get_spark
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
         def make_mixed_request(request_type):
-            app = FastAPI()
-            app.include_router(router)
-
-            spark = MagicMock()
-            user = KBaseUser(user="testuser", admin_perm=AdminPermission.NONE)
-
-            def mock_get_spark():
-                yield spark
-
-            def mock_auth():
-                return user
-
-            app.dependency_overrides[get_spark_session] = mock_get_spark
-            app.dependency_overrides[auth] = mock_auth
-
-            client = TestClient(app)
-
             if request_type == "count":
                 with patch(
                     "src.routes.delta.delta_service.count_delta_table",
