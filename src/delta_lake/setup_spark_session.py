@@ -11,7 +11,6 @@ When updating, copy the file and adapt the imports and warehouse configuration.
 """
 
 import logging
-import os
 import socket
 import warnings
 from datetime import datetime
@@ -418,12 +417,11 @@ def get_spark_session(
     if override:
         config.update(override)
 
-    # For legacy (non-Connect) mode, we must ensure SPARK_REMOTE is not set
-    # PySpark 3.5+ checks this env var and will try to use Connect mode if set,
-    # even when spark.remote is not in the config
-    if not use_spark_connect:
-        os.environ.pop("SPARK_REMOTE", None)
-        config.pop("spark.remote", None)
+    # Clear builder's cached options to prevent conflicts when switching between
+    # Spark Connect and legacy mode within the same process
+    builder = SparkSession.builder
+    if hasattr(builder, "_options"):
+        builder._options.clear()
 
     spark_conf = SparkConf().setAll(list(config.items()))
     spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
