@@ -307,9 +307,7 @@ def get_spark_session(
             fallback_settings_dict = base_user_settings.copy()
             fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
             # Use a dummy connect URL to satisfy Pydantic validation
-            fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl(
-                "sc://localhost:15002"
-            )
+            fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl("sc://localhost:15002")
             # Ensure BERDL_POD_IP is set for legacy mode
             if not fallback_settings_dict.get("BERDL_POD_IP"):
                 fallback_settings_dict["BERDL_POD_IP"] = (
@@ -317,9 +315,7 @@ def get_spark_session(
                 )
 
             fallback_settings = BERDLSettings(**fallback_settings_dict)
-            logger.info(
-                f"Shared cluster settings: {fallback_settings.model_dump()}"
-            )
+            logger.info(f"Shared cluster settings: {fallback_settings.model_dump()}")
 
             # Explicitly unset SPARK_REMOTE environment variable to prevent Spark Connect mode
             old_spark_remote = os.environ.pop("SPARK_REMOTE", None)
