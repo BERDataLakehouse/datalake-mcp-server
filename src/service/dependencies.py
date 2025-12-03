@@ -255,7 +255,8 @@ def get_spark_session(
             try:
                 # Use shared cluster master URL
                 shared_master_url = os.getenv(
-                    "SHARED_SPARK_MASTER_URL", "spark://sharedsparkclustermaster.prod:7077"
+                    "SHARED_SPARK_MASTER_URL",
+                    "spark://sharedsparkclustermaster.prod:7077",
                 )
 
                 fallback_settings = BERDLSettings(

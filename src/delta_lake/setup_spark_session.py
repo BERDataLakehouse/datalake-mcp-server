@@ -20,10 +20,14 @@ from pyspark.sql import SparkSession
 from src.settings import BERDLSettings, get_settings
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
-warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf.runtime_version")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="google.protobuf.runtime_version"
+)
 
 # Suppress CANNOT_MODIFY_CONFIG warnings for Hive metastore settings in Spark Connect
-warnings.filterwarnings("ignore", category=UserWarning, module="pyspark.sql.connect.conf")
+warnings.filterwarnings(
+    "ignore", category=UserWarning, module="pyspark.sql.connect.conf"
+)
 
 # =============================================================================
 # CONSTANTS
@@ -34,7 +38,9 @@ SPARK_DEFAULT_POOL = "default"
 SPARK_POOLS = [SPARK_DEFAULT_POOL, "highPriority"]
 
 # Memory overhead percentages for Spark components
-EXECUTOR_MEMORY_OVERHEAD = 0.1  # 10% overhead for executors (accounts for JVM + system overhead)
+EXECUTOR_MEMORY_OVERHEAD = (
+    0.1  # 10% overhead for executors (accounts for JVM + system overhead)
+)
 DRIVER_MEMORY_OVERHEAD = 0.05  # 5% overhead for driver (typically less memory pressure)
 
 # =============================================================================
@@ -78,7 +84,9 @@ def convert_memory_format(memory_str: str, overhead_percentage: float = 0.1) -> 
     }
 
     # Remove trailing 'b' if present for lookup
-    unit_key = unit_lower.rstrip("b") + "b" if unit_lower.endswith("b") else unit_lower + "b"
+    unit_key = (
+        unit_lower.rstrip("b") + "b" if unit_lower.endswith("b") else unit_lower + "b"
+    )
     if unit_key not in multipliers:
         unit_key = unit_lower
 
@@ -106,7 +114,9 @@ def convert_memory_format(memory_str: str, overhead_percentage: float = 0.1) -> 
     return f"{int(round(adjusted_value))}{spark_unit}"
 
 
-def _get_executor_conf(settings: BERDLSettings, use_spark_connect: bool) -> dict[str, str]:
+def _get_executor_conf(
+    settings: BERDLSettings, use_spark_connect: bool
+) -> dict[str, str]:
     """
     Get Spark executor and driver configuration based on profile settings.
 
@@ -118,8 +128,12 @@ def _get_executor_conf(settings: BERDLSettings, use_spark_connect: bool) -> dict
         Dictionary of Spark executor and driver configuration
     """
     # Convert memory formats from profile to Spark format with overhead adjustment
-    executor_memory = convert_memory_format(settings.SPARK_WORKER_MEMORY, EXECUTOR_MEMORY_OVERHEAD)
-    driver_memory = convert_memory_format(settings.SPARK_MASTER_MEMORY, DRIVER_MEMORY_OVERHEAD)
+    executor_memory = convert_memory_format(
+        settings.SPARK_WORKER_MEMORY, EXECUTOR_MEMORY_OVERHEAD
+    )
+    driver_memory = convert_memory_format(
+        settings.SPARK_MASTER_MEMORY, DRIVER_MEMORY_OVERHEAD
+    )
 
     if use_spark_connect:
         conf_base = {"spark.remote": str(settings.SPARK_CONNECT_URL)}
@@ -182,7 +196,9 @@ def _get_hive_conf(settings: BERDLSettings) -> dict[str, str]:
     }
 
 
-def _get_s3_conf(settings: BERDLSettings, tenant_name: str | None = None) -> dict[str, str]:
+def _get_s3_conf(
+    settings: BERDLSettings, tenant_name: str | None = None
+) -> dict[str, str]:
     """
     Get S3 configuration for MinIO.
 
@@ -210,7 +226,9 @@ def _get_s3_conf(settings: BERDLSettings, tenant_name: str | None = None) -> dic
         "spark.hadoop.fs.s3a.endpoint": settings.MINIO_ENDPOINT_URL,
         "spark.hadoop.fs.s3a.access.key": settings.MINIO_ACCESS_KEY,
         "spark.hadoop.fs.s3a.secret.key": settings.MINIO_SECRET_KEY,
-        "spark.hadoop.fs.s3a.connection.ssl.enabled": str(settings.MINIO_SECURE).lower(),
+        "spark.hadoop.fs.s3a.connection.ssl.enabled": str(
+            settings.MINIO_SECURE
+        ).lower(),
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
         "spark.sql.warehouse.dir": warehouse_dir,
@@ -380,7 +398,14 @@ def get_spark_session(
         >>> spark = get_spark_session("TestApp", local=True)
     """
     config = generate_spark_conf(
-        app_name, local, delta_lake, use_s3, use_hive, settings, tenant_name, use_spark_connect
+        app_name,
+        local,
+        delta_lake,
+        use_s3,
+        use_hive,
+        settings,
+        tenant_name,
+        use_spark_connect,
     )
     if override:
         config.update(override)
