@@ -24,6 +24,8 @@ berdl_notebook_utils = { git = "https://github.com/BERDataLakehouse/spark_notebo
 [dependency-groups]
 dev = [
     "ipython==9.7.0",
-    "pytest==9.0.0",
-    "pytest-cov==7.0.0",
+    "pytest==8.3.5",
+    "pytest-cov==6.1.1",
+    "pytest-asyncio==0.24.0",
+    "pytest-mock==3.14.0",
 ]
