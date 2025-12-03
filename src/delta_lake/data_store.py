@@ -6,8 +6,10 @@ and their schemas from a Spark cluster or directly from Hive metastore in Postgr
 Uses berdl_notebook_utils for shared functionality with the notebook environment.
 """
 
+import atexit
 import json
 import logging
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -22,6 +24,56 @@ from berdl_notebook_utils.spark import data_store as notebook_data_store
 from src.settings import BERDLSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# HTTP CLIENT MANAGEMENT
+# =============================================================================
+# Shared httpx client with connection pooling for governance API calls.
+# Creating a new client per request is inefficient and can exhaust connections.
+
+
+@lru_cache(maxsize=1)
+def _get_http_client() -> httpx.Client:
+    """
+    Get a shared httpx Client with connection pooling.
+
+    The client is cached and reused across all requests for efficiency.
+    Uses reasonable defaults for timeouts and connection limits.
+
+    Returns:
+        Shared httpx.Client instance
+    """
+    logger.info("Initializing shared httpx client for governance API")
+    client = httpx.Client(
+        timeout=httpx.Timeout(
+            connect=10.0,  # Connection timeout
+            read=30.0,  # Read timeout
+            write=10.0,  # Write timeout
+            pool=5.0,  # Pool timeout
+        ),
+        limits=httpx.Limits(
+            max_connections=100,  # Total max connections in pool
+            max_keepalive_connections=20,  # Max idle keepalive connections
+            keepalive_expiry=30.0,  # Keepalive connection expiry in seconds
+        ),
+    )
+    return client
+
+
+def _close_http_client() -> None:
+    """Close the shared HTTP client on shutdown."""
+    if _get_http_client.cache_info().currsize > 0:
+        try:
+            client = _get_http_client()
+            client.close()
+            logger.info("Shared httpx client closed")
+        except Exception as e:
+            logger.warning(f"Error closing httpx client: {e}")
+
+
+# Register cleanup on process exit
+atexit.register(_close_http_client)
 
 # Re-export get_table_schema from berdl_notebook_utils (works identically in both contexts)
 get_table_schema = notebook_data_store.get_table_schema
@@ -105,47 +157,43 @@ def _get_user_namespace_prefixes(auth_token: str) -> List[str]:
     prefixes = []
 
     headers = {"Authorization": f"Bearer {auth_token}"}
+    client = _get_http_client()
 
     try:
         # Get user's namespace prefix
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{governance_url}/workspaces/me/namespace-prefix", headers=headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            user_prefix = data.get("user_namespace_prefix")
-            if user_prefix:
-                prefixes.append(user_prefix)
-                logger.debug(f"User namespace prefix: {user_prefix}")
+        response = client.get(
+            f"{governance_url}/workspaces/me/namespace-prefix", headers=headers
+        )
+        response.raise_for_status()
+        data = response.json()
+        user_prefix = data.get("user_namespace_prefix")
+        if user_prefix:
+            prefixes.append(user_prefix)
+            logger.debug(f"User namespace prefix: {user_prefix}")
 
         # Get user's groups
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{governance_url}/workspaces/me/groups", headers=headers
-            )
-            response.raise_for_status()
-            groups_data = response.json()
-            groups = groups_data.get("groups", [])
-            logger.debug(f"User groups: {groups}")
+        response = client.get(f"{governance_url}/workspaces/me/groups", headers=headers)
+        response.raise_for_status()
+        groups_data = response.json()
+        groups = groups_data.get("groups", [])
+        logger.debug(f"User groups: {groups}")
 
         # Get namespace prefix for each group
         for group_name in groups:
             try:
-                with httpx.Client(timeout=10.0) as client:
-                    response = client.get(
-                        f"{governance_url}/workspaces/me/namespace-prefix",
-                        params={"tenant": group_name},
-                        headers=headers,
+                response = client.get(
+                    f"{governance_url}/workspaces/me/namespace-prefix",
+                    params={"tenant": group_name},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                tenant_prefix = data.get("tenant_namespace_prefix")
+                if tenant_prefix:
+                    prefixes.append(tenant_prefix)
+                    logger.debug(
+                        f"Tenant '{group_name}' namespace prefix: {tenant_prefix}"
                     )
-                    response.raise_for_status()
-                    data = response.json()
-                    tenant_prefix = data.get("tenant_namespace_prefix")
-                    if tenant_prefix:
-                        prefixes.append(tenant_prefix)
-                        logger.debug(
-                            f"Tenant '{group_name}' namespace prefix: {tenant_prefix}"
-                        )
             except Exception as e:
                 logger.warning(
                     f"Could not get namespace prefix for group {group_name}: {e}"
@@ -172,17 +220,17 @@ def _get_accessible_paths(auth_token: str) -> List[str]:
     settings = get_settings()
     governance_url = str(settings.GOVERNANCE_API_URL).rstrip("/")
     headers = {"Authorization": f"Bearer {auth_token}"}
+    client = _get_http_client()
 
     try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{governance_url}/workspaces/me/accessible-paths", headers=headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            accessible_paths = data.get("accessible_paths", [])
-            logger.debug(f"Retrieved {len(accessible_paths)} accessible paths")
-            return accessible_paths
+        response = client.get(
+            f"{governance_url}/workspaces/me/accessible-paths", headers=headers
+        )
+        response.raise_for_status()
+        data = response.json()
+        accessible_paths = data.get("accessible_paths", [])
+        logger.debug(f"Retrieved {len(accessible_paths)} accessible paths")
+        return accessible_paths
 
     except Exception as e:
         logger.error(f"Error fetching accessible paths from governance API: {e}")

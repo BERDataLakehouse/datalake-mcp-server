@@ -60,6 +60,9 @@ class ErrorType(Enum):
     SPARK_QUERY_ERROR = (20090, "Spark query error")
     """ There was an error executing a Spark query. """
 
+    SPARK_TIMEOUT_ERROR = (20100, "Spark operation timed out")
+    """ A Spark operation exceeded its timeout. """
+
     REQUEST_VALIDATION_FAILED = (30010, "Request validation failed")
     """ A request to a service failed validation of the request. """
 

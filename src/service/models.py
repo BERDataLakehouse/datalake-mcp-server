@@ -15,10 +15,33 @@ class ErrorResponse(BaseModel):
     message: Annotated[str | None, Field(description="Error message")] = None
 
 
-class HealthResponse(BaseModel):
-    """Health check response model."""
+class ComponentHealth(BaseModel):
+    """Health status of a single component."""
 
-    status: Annotated[str, Field(description="Health status")]
+    name: Annotated[str, Field(description="Component name")]
+    status: Annotated[
+        Literal["healthy", "unhealthy", "degraded"],
+        Field(description="Component health status"),
+    ]
+    message: Annotated[str | None, Field(description="Optional status message")] = None
+    latency_ms: Annotated[
+        float | None, Field(description="Response time in milliseconds")
+    ] = None
+
+
+class DeepHealthResponse(BaseModel):
+    """Health check response with component-level details."""
+
+    status: Annotated[
+        Literal["healthy", "unhealthy", "degraded"],
+        Field(description="Overall health status"),
+    ]
+    components: Annotated[
+        List[ComponentHealth], Field(description="Health status of each component")
+    ]
+    message: Annotated[
+        str | None, Field(description="Summary message about system health")
+    ] = None
 
 
 class DatabaseListRequest(BaseModel):
