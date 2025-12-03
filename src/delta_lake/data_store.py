@@ -283,6 +283,10 @@ def get_databases(
         ValueError: If use_hms is True but settings is not provided
     """
 
+    # Validate early: auth_token is required if filtering by namespace
+    if filter_by_namespace and not auth_token:
+        raise ValueError("auth_token is required when filter_by_namespace is True")
+
     def _get_dbs(session: SparkSession) -> List[str]:
         return [db.name for db in session.catalog.listDatabases()]
 
@@ -295,8 +299,6 @@ def get_databases(
 
     # Apply filtering: owned databases (fast) + shared databases (API call)
     if filter_by_namespace:
-        if not auth_token:
-            raise ValueError("auth_token is required when filter_by_namespace is True")
 
         try:
             # Step 1: Get owned/group databases using namespace prefixes (fast)
