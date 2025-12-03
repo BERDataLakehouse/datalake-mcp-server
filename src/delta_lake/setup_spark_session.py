@@ -12,6 +12,7 @@ When updating, copy the file and adapt the imports and warehouse configuration.
 
 import logging
 import os
+import socket
 import warnings
 from datetime import datetime
 from typing import Any
@@ -142,11 +143,14 @@ def _get_executor_conf(
     if use_spark_connect:
         conf_base = {"spark.remote": str(settings.SPARK_CONNECT_URL)}
     else:
-        # Legacy mode: add driver/executor configs
+        driver_host = socket.gethostbyname(socket.gethostname())
+
         conf_base = {
-            "spark.driver.host": str(os.environ.get("SPARK_DRIVER_HOST")),
+            "spark.driver.host": driver_host,
+            "spark.driver.bindAddress": "0.0.0.0",  # Bind to all interfaces
             "spark.master": str(settings.SPARK_MASTER_URL),
         }
+        logger.info(f"Legacy mode: driver.host={driver_host}, bindAddress=0.0.0.0")
 
     return {
         **conf_base,
