@@ -5,6 +5,7 @@ Provides timeout wrappers for Spark operations to prevent the service
 from becoming unresponsive due to slow or stuck queries.
 """
 
+import atexit
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -27,6 +28,16 @@ DEFAULT_SPARK_COLLECT_TIMEOUT = int(
 _timeout_executor = ThreadPoolExecutor(
     max_workers=10, thread_name_prefix="spark_timeout"
 )
+
+
+def _shutdown_timeout_executor() -> None:
+    """Shutdown the timeout executor thread pool on process exit."""
+    logger.info("Shutting down timeout executor thread pool")
+    _timeout_executor.shutdown(wait=False)
+
+
+# Register cleanup on process exit
+atexit.register(_shutdown_timeout_executor)
 
 
 T = TypeVar("T")
@@ -53,6 +64,8 @@ def with_timeout(
     """
     if timeout_seconds is None:
         timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
@@ -62,7 +75,9 @@ def with_timeout(
                 result = future.result(timeout=timeout_seconds)
                 return result
             except FuturesTimeoutError:
-                # Try to cancel the future (may not actually stop the Spark job)
+                # Note: cancel() will NOT stop the underlying Spark job.
+                # Once the timeout occurs, the task is already running and cannot
+                # be interrupted. The Spark job continues in the background.
                 future.cancel()
                 logger.error(
                     f"Operation '{operation_name}' timed out after {timeout_seconds}s"
@@ -83,6 +98,7 @@ def run_with_timeout(
     kwargs: dict | None = None,
     timeout_seconds: float | None = None,
     operation_name: str = "spark_operation",
+    spark_session: Any | None = None,
 ) -> T:
     """
     Run a function with a timeout.
@@ -95,6 +111,9 @@ def run_with_timeout(
         kwargs: Keyword arguments for the function
         timeout_seconds: Maximum execution time in seconds
         operation_name: Name of the operation for error messages
+        spark_session: Optional SparkSession to stop on timeout. If provided,
+                      spark.stop() will be called immediately on timeout to
+                      interrupt any running Spark operations.
 
     Returns:
         Result of the function
@@ -106,21 +125,38 @@ def run_with_timeout(
         results = run_with_timeout(
             lambda: spark.sql(query).collect(),
             timeout_seconds=60,
-            operation_name="execute_query"
+            operation_name="execute_query",
+            spark_session=spark,  # Will be stopped on timeout
         )
     """
     if kwargs is None:
         kwargs = {}
     if timeout_seconds is None:
         timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
 
     future = _timeout_executor.submit(func, *args, **kwargs)
     try:
         result = future.result(timeout=timeout_seconds)
         return result
     except FuturesTimeoutError:
+        # Note: cancel() will NOT stop the underlying Spark job.
+        # Once the timeout occurs, the task is already running and cannot
+        # be interrupted. The Spark job continues in the background.
         future.cancel()
         logger.error(f"Operation '{operation_name}' timed out after {timeout_seconds}s")
+
+        # If a SparkSession was provided, stop it to interrupt the operation
+        if spark_session is not None:
+            try:
+                logger.info(
+                    f"Stopping Spark session due to timeout in '{operation_name}'"
+                )
+                spark_session.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping Spark session on timeout: {e}")
+
         raise SparkTimeoutError(
             operation=operation_name,
             timeout=timeout_seconds,

@@ -127,7 +127,7 @@ def _check_hive_metastore() -> bool | str:
     summary="Health check",
     description=(
         "Returns detailed health status of all backend services including "
-        "Redis, PostgreSQL (Hive Metastore), and HMS Thrift connection."
+        "Redis, PostgreSQL (if configured), and Hive Metastore Thrift connection."
     ),
 )
 async def health_check():
