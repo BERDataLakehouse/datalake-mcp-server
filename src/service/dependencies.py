@@ -286,16 +286,12 @@ def get_spark_session(
                 )
 
                 # Log Spark configuration for troubleshooting
+                # Note: Spark Connect doesn't support sparkContext access
                 logger.debug(
                     f"Spark Connect session created. Spark version: {spark.version}"
                 )
-                spark_config = dict(spark.sparkContext.getConf().getAll())
-                logger.debug(f"Spark config keys: {list(spark_config.keys())}")
                 logger.debug(
-                    f"spark.remote = {spark_config.get('spark.remote', 'NOT SET')}"
-                )
-                logger.debug(
-                    f"spark.master = {spark_config.get('spark.master', 'NOT SET')}"
+                    "Spark Connect mode - sparkContext not accessible (client-server architecture)"
                 )
 
                 logger.info(f"✅ Connected via Spark Connect for user {username}")
