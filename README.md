@@ -1,5 +1,7 @@
 # BERDL Datalake MCP Server
 
+[![codecov](https://codecov.io/gh/BERDataLakehouse/datalake-mcp-server/branch/main/graph/badge.svg)](https://codecov.io/gh/BERDataLakehouse/datalake-mcp-server)
+
 A FastAPI-based service that enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark, implementing the Model Context Protocol (MCP) for natural language data operations.
 
 > **⚠️ Important Warning:** 
