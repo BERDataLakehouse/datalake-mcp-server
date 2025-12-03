@@ -144,7 +144,7 @@ def _get_executor_conf(
     else:
         # Legacy mode: add driver/executor configs
         conf_base = {
-            "spark.driver.host": settings.BERDL_POD_IP,
+            "spark.driver.host": str(os.environ.get("SPARK_DRIVER_HOST")),
             "spark.master": str(settings.SPARK_MASTER_URL),
         }
 
@@ -311,7 +311,7 @@ def generate_spark_conf(
     # Generate app name if not provided
     if app_name is None:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        app_name = f"kbase_spark_session_{timestamp}_{settings.USER}"
+        app_name = f"kbase_spark_session_{timestamp}"
 
     # Build common configuration dictionary
     config: dict[str, str] = {"spark.app.name": app_name}
