@@ -3,11 +3,19 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
     branches: [ main, develop ]
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       matrix:
         python-version: ["3.13"]
