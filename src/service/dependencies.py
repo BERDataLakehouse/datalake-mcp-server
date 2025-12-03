@@ -269,7 +269,9 @@ def get_spark_session(
 
         # Quick TCP check to see if Spark Connect port is reachable
         if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
-            logger.info(f"Spark Connect port reachable, attempting connection: {spark_connect_url}")
+            logger.info(
+                f"Spark Connect port reachable, attempting connection: {spark_connect_url}"
+            )
             try:
                 user_settings = BERDLSettings(
                     SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
