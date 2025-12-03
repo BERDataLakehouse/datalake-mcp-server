@@ -306,7 +306,6 @@ def get_spark_session(
                 )
 
             fallback_settings = BERDLSettings(**fallback_settings_dict)
-            logger.info(f"Shared cluster settings: {fallback_settings.model_dump()}")
 
             # Note: SPARK_REMOTE env var handling is done within _get_spark_session
             # when use_spark_connect=False to ensure it's cleared at the right time
