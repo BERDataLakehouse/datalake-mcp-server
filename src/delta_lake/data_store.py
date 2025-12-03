@@ -299,7 +299,6 @@ def get_databases(
 
     # Apply filtering: owned databases (fast) + shared databases (API call)
     if filter_by_namespace:
-
         try:
             # Step 1: Get owned/group databases using namespace prefixes (fast)
             prefixes = _get_user_namespace_prefixes(auth_token)
