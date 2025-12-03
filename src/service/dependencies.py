@@ -5,8 +5,9 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Generator
 
 from fastapi import Depends, Request
 from pydantic import AnyUrl
@@ -149,93 +150,152 @@ def construct_user_spark_connect_url(username: str) -> str:
 def get_spark_session(
     request: Request,
     settings: Annotated[BERDLSettings, Depends(get_settings)],
-) -> SparkSession:
+) -> Generator[SparkSession, None, None]:
     """
-    Get a SparkSession instance configured for the authenticated user.
+    Get a SparkSession instance configured for the authenticated user with automatic cleanup.
 
-    This function connects to the user's personal Spark Connect server running
-    in their notebook pod. Each user has a dedicated Spark cluster (master + workers)
-    and a Spark Connect server in their notebook pod.
+    This function tries to connect to the user's personal Spark Connect server first.
+    If unavailable, it falls back to a shared Spark cluster. The session is created
+    fresh for each request with the user's MinIO credentials, ensuring proper isolation.
+
+    The session is automatically stopped after the request completes via generator cleanup.
+
+    Connection Strategy:
+    1. Try user's Spark Connect server (sc://jupyter-{username}:15002)
+    2. Fall back to shared Spark cluster (spark://sharedsparkclustermaster.prod:7077)
+
+    Usage in endpoints:
+        @app.get("/databases")
+        def get_databases(spark: Annotated[SparkSession, Depends(get_spark_session)]):
+            # Use spark here
+            databases = spark.sql("SHOW DATABASES").collect()
+            return {"databases": [db.databaseName for db in databases]}
+            # spark.stop() is automatically called after return
 
     Args:
         request: FastAPI request object (used to extract authenticated user)
         settings: BERDL settings from environment variables
 
-    Returns:
-        SparkSession configured to connect to the user's Spark Connect server
+    Yields:
+        SparkSession configured for the user (either via Connect or direct cluster)
 
     Raises:
-        Exception: If user is not authenticated or Spark Connect server is unreachable
+        Exception: If user is not authenticated or both connection methods fail
     """
-    # Get authenticated user from request
-    username = get_user_from_request(request)
-
-    logger.info(f"Creating Spark session for user: {username}")
-
-    # Construct user-specific Spark Connect URL
-    spark_connect_url = construct_user_spark_connect_url(username)
-
-    # Read user's MinIO credentials from their home directory
+    spark = None
     try:
-        minio_access_key, minio_secret_key = read_user_minio_credentials(username)
-        logger.debug(f"Loaded MinIO credentials for user {username}")
-    except FileNotFoundError as e:
-        logger.error(f"MinIO credentials file not found for {username}: {e}")
-        raise Exception(
-            f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
-            f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
-        )
-    except Exception as e:
-        logger.error(
-            f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
-            exc_info=True,
-        )
-        raise Exception(
-            f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
-        )
+        # Get authenticated user from request
+        username = get_user_from_request(request)
 
-    # Build user-specific settings for Spark session
-    # This uses MCP server's BERDLSettings which has sensible defaults
-    user_settings = BERDLSettings(
-        USER=username,
-        SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-        MINIO_ACCESS_KEY=minio_access_key,
-        MINIO_SECRET_KEY=minio_secret_key,
-        MINIO_ENDPOINT_URL=settings.MINIO_ENDPOINT_URL,
-        MINIO_SECURE=settings.MINIO_SECURE,
-        SPARK_HOME=settings.SPARK_HOME,
-        SPARK_MASTER_URL=settings.SPARK_MASTER_URL,
-        BERDL_HIVE_METASTORE_URI=settings.BERDL_HIVE_METASTORE_URI,
-        SPARK_WORKER_COUNT=settings.SPARK_WORKER_COUNT,
-        SPARK_WORKER_CORES=settings.SPARK_WORKER_CORES,
-        SPARK_WORKER_MEMORY=settings.SPARK_WORKER_MEMORY,
-        SPARK_MASTER_CORES=settings.SPARK_MASTER_CORES,
-        SPARK_MASTER_MEMORY=settings.SPARK_MASTER_MEMORY,
-        GOVERNANCE_API_URL=settings.GOVERNANCE_API_URL,
-        BERDL_POD_IP=settings.BERDL_POD_IP,
-    )
+        logger.info(f"Creating Spark session for user: {username}")
 
-    try:
-        logger.info(
-            f"Connecting to Spark Connect server for user {username} at {spark_connect_url}"
-        )
+        # Read user's MinIO credentials from their home directory
+        try:
+            minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+            logger.debug(f"Loaded MinIO credentials for user {username}")
+        except FileNotFoundError as e:
+            logger.error(f"MinIO credentials file not found for {username}: {e}")
+            raise Exception(
+                f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
+                f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            raise Exception(
+                f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+            )
 
-        spark = _get_spark_session(
-            app_name=f"datalake_mcp_server_{username}",
-            settings=user_settings,
-        )
+        # Build base user-specific settings
+        base_user_settings = {
+            "USER": username,
+            "MINIO_ACCESS_KEY": minio_access_key,
+            "MINIO_SECRET_KEY": minio_secret_key,
+            "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+            "MINIO_SECURE": settings.MINIO_SECURE,
+            "SPARK_HOME": settings.SPARK_HOME,
+            "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
+            "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
+            "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
+            "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
+            "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
+            "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
+            "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
+            "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
+            "BERDL_POD_IP": settings.BERDL_POD_IP,
+        }
 
-        logger.info(
-            f"Successfully connected to Spark Connect server for user {username}"
-        )
-        return spark
+        # Try Spark Connect first
+        spark_connect_url = construct_user_spark_connect_url(username)
+        logger.info(f"Attempting to connect via Spark Connect: {spark_connect_url}")
 
-    except Exception as e:
-        logger.error(
-            f"Failed to connect to Spark Connect server for user {username}: {e}"
-        )
-        raise Exception(
-            f"Unable to connect to Spark session for user {username}. "
-            f"Please ensure you are logged into BERDL JupyterHub and your notebook is running. "
-            f"Error: {str(e)}"
-        )
+        try:
+            user_settings = BERDLSettings(
+                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                **base_user_settings,
+            )
+
+            spark = _get_spark_session(
+                app_name=f"datalake_mcp_server_{username}",
+                settings=user_settings,
+                use_spark_connect=True,
+            )
+
+            logger.info(f"✅ Connected via Spark Connect for user {username}")
+
+        except Exception as connect_error:
+            logger.warning(
+                f"Spark Connect unavailable for user {username}: {connect_error}"
+            )
+            logger.info("Falling back to shared Spark cluster...")
+
+            # Fall back to shared Spark cluster
+            try:
+                # Use shared cluster master URL
+                shared_master_url = os.getenv(
+                    "SHARED_SPARK_MASTER_URL", "spark://sharedsparkclustermaster.prod:7077"
+                )
+
+                fallback_settings = BERDLSettings(
+                    SPARK_MASTER_URL=AnyUrl(shared_master_url),
+                    **base_user_settings,
+                )
+
+                spark = _get_spark_session(
+                    app_name=f"datalake_mcp_server_{username}_shared",
+                    settings=fallback_settings,
+                    use_spark_connect=False,
+                )
+
+                logger.info(
+                    f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
+                )
+
+            except Exception as cluster_error:
+                logger.error(
+                    f"Both Spark Connect and shared cluster failed for user {username}"
+                )
+                logger.error(f"Spark Connect error: {connect_error}")
+                logger.error(f"Shared cluster error: {cluster_error}")
+                raise Exception(
+                    f"Unable to create Spark session for user {username}. "
+                    f"Spark Connect unavailable: {connect_error}. "
+                    f"Shared cluster unavailable: {cluster_error}. "
+                    f"Please contact a BERDL administrator."
+                )
+
+        # Yield the spark session to the endpoint
+        logger.debug("Spark session created, yielding to endpoint")
+        yield spark
+
+    finally:
+        # Always stop the session, even if an exception occurred
+        if spark is not None:
+            try:
+                logger.info("Stopping Spark session (cleanup)")
+                spark.stop()
+                logger.debug("Spark session stopped successfully")
+            except Exception as e:
+                logger.error(f"Error stopping Spark session: {e}", exc_info=True)
