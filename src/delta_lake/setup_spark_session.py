@@ -11,13 +11,13 @@ When updating, copy the file and adapt the imports and warehouse configuration.
 """
 
 import logging
+import os
 import warnings
 from datetime import datetime
 from typing import Any
 
 from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
-
 from src.settings import BERDLSettings, get_settings
 
 # Configure logging
@@ -401,8 +401,6 @@ def get_spark_session(
         >>> # Local development
         >>> spark = get_spark_session("TestApp", local=True)
     """
-    import os
-
     config = generate_spark_conf(
         app_name,
         local,
@@ -415,14 +413,6 @@ def get_spark_session(
     )
     if override:
         config.update(override)
-
-    # Log configuration for troubleshooting
-    logger.info(f"Generated Spark config (use_spark_connect={use_spark_connect}):")
-    logger.info(f"  Total config items: {len(config)}")
-    logger.info(f"  spark.remote: {config.get('spark.remote', 'NOT SET')}")
-    logger.info(f"  spark.master: {config.get('spark.master', 'NOT SET')}")
-    logger.info(f"  spark.driver.host: {config.get('spark.driver.host', 'NOT SET')}")
-    logger.info(f"  Full config: {config}")
 
     # For legacy (non-Connect) mode, we must ensure SPARK_REMOTE is not set
     # PySpark 3.5+ checks this env var and will try to use Connect mode if set,

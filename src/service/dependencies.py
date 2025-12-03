@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import socket
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Generator
 from urllib.parse import urlparse
@@ -276,21 +277,11 @@ def get_spark_session(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
                 **base_user_settings,
             )
-            logger.debug(f"Spark Connect settings: {user_settings.model_dump()}")
 
             spark = _get_spark_session(
                 app_name=f"datalake_mcp_server_{username}",
                 settings=user_settings,
                 use_spark_connect=True,
-            )
-
-            # Log Spark configuration for troubleshooting
-            # Note: Spark Connect doesn't support sparkContext access
-            logger.debug(
-                f"Spark Connect session created. Spark version: {spark.version}"
-            )
-            logger.debug(
-                "Spark Connect mode - sparkContext not accessible (client-server architecture)"
             )
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
@@ -319,8 +310,9 @@ def get_spark_session(
 
             # Note: SPARK_REMOTE env var handling is done within _get_spark_session
             # when use_spark_connect=False to ensure it's cleared at the right time
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             spark = _get_spark_session(
-                app_name=f"datalake_mcp_server_{username}_shared",
+                app_name=f"datalake_mcp_server_{username}_{timestamp}",
                 settings=fallback_settings,
                 use_spark_connect=False,
             )
