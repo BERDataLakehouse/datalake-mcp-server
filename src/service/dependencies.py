@@ -5,9 +5,10 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import socket
 from pathlib import Path
 from typing import Annotated, Generator
+from urllib.parse import urlparse
 
 from fastapi import Depends, Request
 from pydantic import AnyUrl
@@ -147,6 +148,41 @@ def construct_user_spark_connect_url(username: str) -> str:
     return url
 
 
+def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 1.0) -> bool:
+    """
+    Quick TCP check if Spark Connect server is reachable.
+
+    Args:
+        spark_connect_url: Spark Connect URL (e.g., "sc://jupyter-user.namespace:15002")
+        timeout: Connection timeout in seconds (default: 1.0)
+
+    Returns:
+        True if port is reachable, False otherwise
+    """
+    try:
+        # Parse URL to extract host and port
+        # Format: sc://host:port
+        url_str = spark_connect_url.replace("sc://", "tcp://")
+        parsed = urlparse(url_str)
+        host = parsed.hostname
+        port = parsed.port or 15002  # Default Spark Connect port
+
+        if not host:
+            logger.debug(f"Failed to parse hostname from URL: {spark_connect_url}")
+            return False
+
+        # Attempt TCP connection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+
+        return result == 0
+    except Exception as e:
+        logger.debug(f"TCP check failed for {spark_connect_url}: {e}")
+        return False
+
+
 def get_spark_session(
     request: Request,
     settings: Annotated[BERDLSettings, Depends(get_settings)],
@@ -227,44 +263,33 @@ def get_spark_session(
             "BERDL_POD_IP": settings.BERDL_POD_IP,
         }
 
-        # Try Spark Connect first with timeout
+        # Try Spark Connect first with TCP pre-flight check
         spark_connect_url = construct_user_spark_connect_url(username)
-        logger.info(f"Attempting to connect via Spark Connect: {spark_connect_url}")
+        logger.info(f"Checking Spark Connect availability: {spark_connect_url}")
 
-        def try_spark_connect():
-            """Attempt Spark Connect connection (runs in separate thread for timeout)."""
-            user_settings = BERDLSettings(
-                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                **base_user_settings,
-            )
-            return _get_spark_session(
-                app_name=f"datalake_mcp_server_{username}",
-                settings=user_settings,
-                use_spark_connect=True,
-            )
+        # Quick TCP check to see if Spark Connect port is reachable
+        if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
+            logger.info(f"Spark Connect port reachable, attempting connection: {spark_connect_url}")
+            try:
+                user_settings = BERDLSettings(
+                    SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                    **base_user_settings,
+                )
+                spark = _get_spark_session(
+                    app_name=f"datalake_mcp_server_{username}",
+                    settings=user_settings,
+                    use_spark_connect=True,
+                )
+                logger.info(f"✅ Connected via Spark Connect for user {username}")
+            except Exception as e:
+                logger.warning(f"Spark Connect session creation failed: {e}")
+                spark = None  # Trigger fallback
+        else:
+            logger.info("Spark Connect port unreachable, skipping to shared cluster")
+            spark = None
 
-        connect_error = None
-        try:
-            # Use ThreadPoolExecutor to enforce timeout on connection attempt
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(try_spark_connect)
-                # Wait up to 5 seconds for Spark Connect to respond
-                spark = future.result(timeout=5.0)
-
-            logger.info(f"✅ Connected via Spark Connect for user {username}")
-
-        except FuturesTimeoutError as e:
-            logger.warning(
-                f"Spark Connect connection timed out after 5 seconds for user {username}"
-            )
-            connect_error = e
-
-        except Exception as e:
-            logger.warning(f"Spark Connect unavailable for user {username}: {e}")
-            connect_error = e
-
-        # If Spark Connect failed, fall back to shared Spark cluster
-        if connect_error is not None:
+        # Fall back to shared Spark cluster if needed
+        if spark is None:
             logger.info("Falling back to shared Spark cluster...")
             try:
                 # Use shared cluster master URL
@@ -293,12 +318,10 @@ def get_spark_session(
                 logger.error(
                     f"Both Spark Connect and shared cluster failed for user {username}"
                 )
-                logger.error(f"Spark Connect error: {connect_error}")
                 logger.error(f"Shared cluster error: {cluster_error}")
                 raise Exception(
                     f"Unable to create Spark session for user {username}. "
-                    f"Spark Connect unavailable: {connect_error}. "
-                    f"Shared cluster unavailable: {cluster_error}. "
+                    f"Spark Connect unavailable, shared cluster failed: {cluster_error}. "
                     f"Please contact a BERDL administrator."
                 )
 
