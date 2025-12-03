@@ -431,7 +431,9 @@ def get_spark_session(
     if not use_spark_connect:
         saved_spark_remote = os.environ.pop("SPARK_REMOTE", None)
         if saved_spark_remote:
-            logger.info(f"Temporarily cleared SPARK_REMOTE env var (was: {saved_spark_remote})")
+            logger.info(
+                f"Temporarily cleared SPARK_REMOTE env var (was: {saved_spark_remote})"
+            )
         # Also ensure spark.remote is explicitly NOT in the config
         config.pop("spark.remote", None)
 
