@@ -10,6 +10,7 @@ MAINTENANCE NOTE: This file is copied from:
 When updating, copy the file and adapt the imports and warehouse configuration.
 """
 
+import logging
 import warnings
 from datetime import datetime
 from typing import Any
@@ -18,6 +19,9 @@ from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
 
 from src.settings import BERDLSettings, get_settings
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
 warnings.filterwarnings(
@@ -409,6 +413,14 @@ def get_spark_session(
     )
     if override:
         config.update(override)
+
+    # Log configuration for troubleshooting
+    logger.info(f"Generated Spark config (use_spark_connect={use_spark_connect}):")
+    logger.info(f"  Total config items: {len(config)}")
+    logger.info(f"  spark.remote: {config.get('spark.remote', 'NOT SET')}")
+    logger.info(f"  spark.master: {config.get('spark.master', 'NOT SET')}")
+    logger.info(f"  spark.driver.host: {config.get('spark.driver.host', 'NOT SET')}")
+    logger.info(f"  Full config: {config}")
 
     spark_conf = SparkConf().setAll(list(config.items()))
     spark = SparkSession.builder.config(conf=spark_conf).getOrCreate()
