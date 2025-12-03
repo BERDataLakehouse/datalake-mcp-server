@@ -272,100 +272,79 @@ def get_spark_session(
             logger.info(
                 f"Spark Connect port reachable, attempting connection: {spark_connect_url}"
             )
-            try:
-                user_settings = BERDLSettings(
-                    SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                    **base_user_settings,
-                )
-                logger.debug(f"Spark Connect settings: {user_settings.model_dump()}")
+            user_settings = BERDLSettings(
+                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                **base_user_settings,
+            )
+            logger.debug(f"Spark Connect settings: {user_settings.model_dump()}")
 
-                spark = _get_spark_session(
-                    app_name=f"datalake_mcp_server_{username}",
-                    settings=user_settings,
-                    use_spark_connect=True,
-                )
+            spark = _get_spark_session(
+                app_name=f"datalake_mcp_server_{username}",
+                settings=user_settings,
+                use_spark_connect=True,
+            )
 
-                # Log Spark configuration for troubleshooting
-                # Note: Spark Connect doesn't support sparkContext access
-                logger.debug(
-                    f"Spark Connect session created. Spark version: {spark.version}"
-                )
-                logger.debug(
-                    "Spark Connect mode - sparkContext not accessible (client-server architecture)"
-                )
+            # Log Spark configuration for troubleshooting
+            # Note: Spark Connect doesn't support sparkContext access
+            logger.debug(
+                f"Spark Connect session created. Spark version: {spark.version}"
+            )
+            logger.debug(
+                "Spark Connect mode - sparkContext not accessible (client-server architecture)"
+            )
 
-                logger.info(f"✅ Connected via Spark Connect for user {username}")
-            except Exception as e:
-                logger.warning(f"Spark Connect session creation failed: {e}")
-                spark = None  # Trigger fallback
+            logger.info(f"✅ Connected via Spark Connect for user {username}")
         else:
-            logger.info("Spark Connect port unreachable, skipping to shared cluster")
-            spark = None
+            logger.info("Spark Connect port unreachable, using shared Spark cluster")
 
-        # Fall back to shared Spark cluster if needed
-        if spark is None:
-            logger.info("Falling back to shared Spark cluster...")
+            # Use shared cluster master URL
+            shared_master_url = os.getenv(
+                "SHARED_SPARK_MASTER_URL",
+                "spark://sharedsparkclustermaster.prod:7077",
+            )
+
+            # Create fallback settings with updated SPARK_MASTER_URL
+            fallback_settings_dict = base_user_settings.copy()
+            fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
+            # Use a dummy connect URL to satisfy Pydantic validation
+            fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl(
+                "sc://localhost:15002"
+            )
+            # Ensure BERDL_POD_IP is set for legacy mode
+            if not fallback_settings_dict.get("BERDL_POD_IP"):
+                fallback_settings_dict["BERDL_POD_IP"] = (
+                    "0.0.0.0"  # Let Spark auto-detect
+                )
+
+            fallback_settings = BERDLSettings(**fallback_settings_dict)
+            logger.info(
+                f"Shared cluster settings: {fallback_settings.model_dump()}"
+            )
+
+            # Explicitly unset SPARK_REMOTE environment variable to prevent Spark Connect mode
+            old_spark_remote = os.environ.pop("SPARK_REMOTE", None)
+            logger.info(f"SPARK_REMOTE before session creation: {old_spark_remote}")
+            logger.info(
+                f"Current SPARK_REMOTE in env: {os.environ.get('SPARK_REMOTE', 'NOT SET')}"
+            )
+
             try:
-                # Use shared cluster master URL
-                shared_master_url = os.getenv(
-                    "SHARED_SPARK_MASTER_URL",
-                    "spark://sharedsparkclustermaster.prod:7077",
+                spark = _get_spark_session(
+                    app_name=f"datalake_mcp_server_{username}_shared",
+                    settings=fallback_settings,
+                    use_spark_connect=False,
                 )
-
-                # Create fallback settings with updated SPARK_MASTER_URL
-                fallback_settings_dict = base_user_settings.copy()
-                fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
-                # Use a dummy connect URL to satisfy Pydantic validation
-                fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl(
-                    "sc://localhost:15002"
-                )
-                # Ensure BERDL_POD_IP is set for legacy mode
-                if not fallback_settings_dict.get("BERDL_POD_IP"):
-                    fallback_settings_dict["BERDL_POD_IP"] = (
-                        "0.0.0.0"  # Let Spark auto-detect
-                    )
-
-                fallback_settings = BERDLSettings(**fallback_settings_dict)
+            finally:
+                # Restore SPARK_REMOTE if it was set
+                if old_spark_remote is not None:
+                    os.environ["SPARK_REMOTE"] = old_spark_remote
                 logger.info(
-                    f"Shared cluster settings: {fallback_settings.model_dump()}"
+                    f"SPARK_REMOTE after session creation: {os.environ.get('SPARK_REMOTE', 'NOT SET')}"
                 )
 
-                # Explicitly unset SPARK_REMOTE environment variable to prevent Spark Connect mode
-                old_spark_remote = os.environ.pop("SPARK_REMOTE", None)
-                logger.info(f"SPARK_REMOTE before session creation: {old_spark_remote}")
-                logger.info(
-                    f"Current SPARK_REMOTE in env: {os.environ.get('SPARK_REMOTE', 'NOT SET')}"
-                )
-
-                try:
-                    spark = _get_spark_session(
-                        app_name=f"datalake_mcp_server_{username}_shared",
-                        settings=fallback_settings,
-                        use_spark_connect=False,
-                    )
-
-                finally:
-                    # Restore SPARK_REMOTE if it was set
-                    if old_spark_remote is not None:
-                        os.environ["SPARK_REMOTE"] = old_spark_remote
-                    logger.info(
-                        f"SPARK_REMOTE after session creation: {os.environ.get('SPARK_REMOTE', 'NOT SET')}"
-                    )
-
-                logger.info(
-                    f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
-                )
-
-            except Exception as cluster_error:
-                logger.error(
-                    f"Both Spark Connect and shared cluster failed for user {username}"
-                )
-                logger.error(f"Shared cluster error: {cluster_error}")
-                raise Exception(
-                    f"Unable to create Spark session for user {username}. "
-                    f"Spark Connect unavailable, shared cluster failed: {cluster_error}. "
-                    f"Please contact a BERDL administrator."
-                )
+            logger.info(
+                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
+            )
 
         # Yield the spark session to the endpoint
         logger.debug("Spark session created, yielding to endpoint")
