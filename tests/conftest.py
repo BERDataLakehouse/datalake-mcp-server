@@ -9,6 +9,7 @@ Provides reusable mocks for external dependencies:
 """
 
 import asyncio
+import concurrent.futures
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,9 +18,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, AnyUrl
 
+from src.service.app_state import RequestState
+from src.service.dependencies import auth, get_spark_session
+from src.service.exceptions import InvalidTokenError
 from src.service.kb_auth import AdminPermission, KBaseUser
 from src.settings import BERDLSettings
-
 
 # =============================================================================
 # Settings Fixtures
@@ -317,8 +320,6 @@ def mock_kbase_auth(mock_kbase_user):
         auth = MagicMock()
 
         async def get_user_side_effect(token):
-            from src.service.exceptions import InvalidTokenError
-
             if token in valid_tokens:
                 username = valid_tokens[token]
                 admin_perm = (
@@ -456,7 +457,6 @@ def mock_app_dependencies(mock_spark_session, mock_kbase_user, mock_settings):
     This fixture patches both auth and spark session dependencies.
     """
     from src.main import create_application
-    from src.service.dependencies import auth, get_spark_session
 
     app = create_application()
 
@@ -537,7 +537,6 @@ def mock_request(mock_kbase_user):
 
         # Set up request state with user
         request.state = MagicMock()
-        from src.service.app_state import RequestState
 
         request.state._request_state = RequestState(
             user=mock_kbase_user(user) if user else None
@@ -562,7 +561,6 @@ def concurrent_executor():
         def test_concurrent(concurrent_executor):
             results = concurrent_executor(my_func, args_list, max_workers=10)
     """
-    import concurrent.futures
 
     def _execute(func, args_list, max_workers=10):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

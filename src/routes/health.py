@@ -10,7 +10,10 @@ from typing import Callable
 
 from fastapi import APIRouter
 
+from src.cache.redis_cache import _get_redis_client
+from src.delta_lake.hive_metastore import get_hive_metastore_client
 from src.service.models import ComponentHealth, DeepHealthResponse
+from src.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +72,6 @@ def _timed_check(name: str, check_fn: Callable[[], bool | str]) -> ComponentHeal
 
 def _check_redis() -> bool | str:
     """Check Redis connectivity."""
-    from src.cache.redis_cache import _get_redis_client
 
     client = _get_redis_client()
     if client is None:
@@ -80,34 +82,8 @@ def _check_redis() -> bool | str:
     return response is True
 
 
-def _check_postgresql() -> bool | str:
-    """Check PostgreSQL connectivity."""
-    import os
-
-    # Skip check if PostgreSQL is not configured
-    if not os.environ.get("POSTGRES_URL"):
-        return "PostgreSQL not configured (optional)"
-
-    from src.postgres.connection import get_postgres_connection
-
-    conn = get_postgres_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 AS health_check")
-            result = cur.fetchone()
-            # Result is a dict due to dict_row factory from connection.py
-            if result is None:
-                return False
-            # Access as dict (dict_row returns dict-like objects)
-            return result["health_check"] == 1  # type: ignore[index]
-    finally:
-        conn.close()
-
-
 def _check_hive_metastore() -> bool | str:
     """Check Hive Metastore connectivity."""
-    from src.delta_lake.hive_metastore import get_hive_metastore_client
-    from src.settings import get_settings
 
     settings = get_settings()
     client = get_hive_metastore_client(settings)
