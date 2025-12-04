@@ -12,6 +12,7 @@ When updating, copy the file and adapt the imports and warehouse configuration.
 
 import logging
 import os
+import re
 import socket
 import threading
 import warnings
@@ -20,6 +21,7 @@ from typing import Any
 
 from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
+
 from src.settings import BERDLSettings, get_settings
 
 # Configure logging
@@ -74,7 +76,6 @@ def convert_memory_format(memory_str: str, overhead_percentage: float = 0.1) -> 
     Returns:
         Memory string in Spark format with overhead accounted for
     """
-    import re
 
     # Extract number and unit from memory string
     match = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgtKMGT]i?[bB]?)$", memory_str)

@@ -12,6 +12,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cacheout.lru import LRUCache
 
 from src.service.kb_auth import (
     KBaseAuth,
@@ -227,8 +228,6 @@ class TestKBaseAuthGetUser:
     @pytest.fixture
     def mock_auth(self):
         """Create a mock KBaseAuth instance."""
-        from cacheout.lru import LRUCache
-
         auth = MagicMock(spec=KBaseAuth)
         auth._url = "https://auth.kbase.us/"
         auth._me_url = "https://auth.kbase.us/api/V2/me"
@@ -402,8 +401,6 @@ class TestConcurrentAuthAccess:
     @pytest.mark.asyncio
     async def test_concurrent_get_user_calls(self, async_concurrent_executor):
         """Test multiple concurrent get_user calls with cache."""
-        from cacheout.lru import LRUCache
-
         # Create a simple mock auth
         auth = MagicMock()
         auth._url = "https://auth.kbase.us/"
@@ -442,8 +439,6 @@ class TestConcurrentAuthAccess:
     @pytest.mark.asyncio
     async def test_concurrent_different_tokens(self, async_concurrent_executor):
         """Test concurrent calls with different tokens."""
-        from cacheout.lru import LRUCache
-
         auth = MagicMock()
         auth._url = "https://auth.kbase.us/"
         auth._me_url = "https://auth.kbase.us/api/V2/me"

@@ -15,8 +15,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import router
+from src.routes.delta import _extract_token_from_request, router
 from src.service.dependencies import get_spark_session, auth
+from src.service.exceptions import (
+    DeltaDatabaseNotFoundError,
+    DeltaTableNotFoundError,
+    SparkOperationError,
+    SparkTimeoutError,
+)
+from src.service.kb_auth import KBaseUser, AdminPermission
 from src.service.models import (
     AggregationSpec,
     ColumnSpec,
@@ -27,7 +34,6 @@ from src.service.models import (
     TableSelectRequest,
     TableSelectResponse,
 )
-from src.service.kb_auth import KBaseUser, AdminPermission
 
 
 # =============================================================================
@@ -631,30 +637,22 @@ class TestErrorResponses:
 
     def test_database_not_found_error(self):
         """Test that DeltaDatabaseNotFoundError is raised correctly."""
-        from src.service.exceptions import DeltaDatabaseNotFoundError
-
         # Test the exception can be raised and caught
         with pytest.raises(DeltaDatabaseNotFoundError):
             raise DeltaDatabaseNotFoundError("Database not found")
 
     def test_table_not_found_error(self):
         """Test that DeltaTableNotFoundError is raised correctly."""
-        from src.service.exceptions import DeltaTableNotFoundError
-
         with pytest.raises(DeltaTableNotFoundError):
             raise DeltaTableNotFoundError("Table not found")
 
     def test_spark_operation_error(self):
         """Test that SparkOperationError is raised correctly."""
-        from src.service.exceptions import SparkOperationError
-
         with pytest.raises(SparkOperationError):
             raise SparkOperationError("Spark failed")
 
     def test_spark_timeout_error(self):
         """Test that SparkTimeoutError is raised correctly."""
-        from src.service.exceptions import SparkTimeoutError
-
         error = SparkTimeoutError(operation="count", timeout=30)
         assert error.operation == "count"
         assert error.timeout == 30
@@ -794,8 +792,6 @@ class TestTokenExtraction:
 
     def test_extract_valid_bearer_token(self):
         """Test extracting valid Bearer token."""
-        from src.routes.delta import _extract_token_from_request
-
         request = MagicMock()
         request.headers = {"Authorization": "Bearer my_token_12345"}
 
@@ -805,8 +801,6 @@ class TestTokenExtraction:
 
     def test_extract_missing_header_returns_none(self):
         """Test that missing header returns None."""
-        from src.routes.delta import _extract_token_from_request
-
         request = MagicMock()
         request.headers = {}
 
@@ -816,8 +810,6 @@ class TestTokenExtraction:
 
     def test_extract_non_bearer_returns_none(self):
         """Test that non-Bearer auth returns None."""
-        from src.routes.delta import _extract_token_from_request
-
         request = MagicMock()
         request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
 

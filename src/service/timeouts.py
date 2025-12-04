@@ -8,7 +8,9 @@ from becoming unresponsive due to slow or stuck queries.
 import atexit
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Callable, TypeVar
@@ -182,7 +184,6 @@ def spark_operation_timeout(
         with spark_operation_timeout(60, "count_table"):
             count = spark.table("large_table").count()
     """
-    import time
 
     if timeout_seconds is None:
         timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
