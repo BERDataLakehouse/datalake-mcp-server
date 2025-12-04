@@ -141,7 +141,6 @@ async def health_check():
     """
     components = [
         _timed_check("redis", _check_redis),
-        _timed_check("postgresql", _check_postgresql),
         _timed_check("hive_metastore", _check_hive_metastore),
     ]
 
