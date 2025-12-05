@@ -23,6 +23,7 @@ from src.service.dependencies import (
     construct_user_spark_connect_url,
     is_spark_connect_reachable,
     get_spark_session,
+    sanitize_k8s_name,
     DEFAULT_SPARK_POOL,
     SPARK_CONNECT_PORT,
 )
@@ -165,6 +166,99 @@ class TestGetUserFromRequest:
 
 
 # =============================================================================
+# Test sanitize_k8s_name
+# =============================================================================
+
+
+class TestSanitizeK8sName:
+    """Tests for the sanitize_k8s_name function."""
+
+    def test_lowercase_alphanumeric_unchanged(self):
+        """Test that DNS-compliant lowercase alphanumeric names are unchanged."""
+        assert sanitize_k8s_name("user123") == "user123"
+        assert sanitize_k8s_name("myuser") == "myuser"
+        assert sanitize_k8s_name("testuser456") == "testuser456"
+
+    def test_underscores_replaced_with_hyphens(self):
+        """Test that underscores are replaced with hyphens."""
+        assert sanitize_k8s_name("user_name") == "user-name"
+        assert sanitize_k8s_name("tian_gu_test") == "tian-gu-test"
+        assert sanitize_k8s_name("my_test_user") == "my-test-user"
+
+    def test_uppercase_converted_to_lowercase(self):
+        """Test that uppercase characters are converted to lowercase."""
+        assert sanitize_k8s_name("UserName") == "username"
+        assert sanitize_k8s_name("TESTUSER") == "testuser"
+        assert sanitize_k8s_name("MyUser123") == "myuser123"
+
+    def test_mixed_case_with_underscores(self):
+        """Test mixed case with underscores (real-world KBase usernames)."""
+        assert sanitize_k8s_name("Tian_Gu_Test") == "tian-gu-test"
+        assert sanitize_k8s_name("Jeff_Cohere") == "jeff-cohere"
+
+    def test_special_characters_replaced(self):
+        """Test that special characters are replaced with hyphens."""
+        assert sanitize_k8s_name("user@name") == "user-name"
+        assert sanitize_k8s_name("user#name") == "user-name"
+        assert sanitize_k8s_name("user$name") == "user-name"
+        assert sanitize_k8s_name("user name") == "user-name"  # Space
+
+    def test_leading_hyphens_removed(self):
+        """Test that leading non-alphanumeric characters are removed."""
+        assert sanitize_k8s_name("_username") == "username"
+        assert sanitize_k8s_name("-username") == "username"
+        assert sanitize_k8s_name("__username") == "username"
+
+    def test_trailing_hyphens_removed(self):
+        """Test that trailing non-alphanumeric characters are removed."""
+        assert sanitize_k8s_name("username_") == "username"
+        assert sanitize_k8s_name("username-") == "username"
+        assert sanitize_k8s_name("username__") == "username"
+
+    def test_multiple_consecutive_hyphens_collapsed(self):
+        """Test that multiple consecutive hyphens are collapsed to one."""
+        assert sanitize_k8s_name("user___name") == "user-name"
+        assert sanitize_k8s_name("user---name") == "user-name"
+        assert sanitize_k8s_name("user_-_name") == "user-name"
+
+    def test_dots_preserved(self):
+        """Test that dots are preserved (valid in DNS-1123)."""
+        assert sanitize_k8s_name("user.name") == "user.name"
+        assert sanitize_k8s_name("test.user.123") == "test.user.123"
+
+    def test_truncation_at_253_chars(self):
+        """Test that names longer than 253 characters are truncated."""
+        long_name = "a" * 300
+        result = sanitize_k8s_name(long_name)
+        assert len(result) == 253
+        assert result == "a" * 253
+
+    def test_empty_string(self):
+        """Test handling of empty string."""
+        assert sanitize_k8s_name("") == ""
+
+    def test_only_special_characters(self):
+        """Test handling of string with only special characters."""
+        assert sanitize_k8s_name("___") == ""
+        assert sanitize_k8s_name("@#$") == ""
+
+    def test_real_kbase_usernames(self):
+        """Test with realistic KBase username patterns."""
+        # Common patterns in KBase
+        assert sanitize_k8s_name("tgu2") == "tgu2"
+        assert sanitize_k8s_name("jeff_cohere") == "jeff-cohere"
+        assert sanitize_k8s_name("tian_gu_test") == "tian-gu-test"
+        assert sanitize_k8s_name("user233") == "user233"
+
+    def test_idempotency(self):
+        """Test that sanitizing an already sanitized name doesn't change it."""
+        name = "user-name-123"
+        assert sanitize_k8s_name(name) == name
+        # Double sanitization should be idempotent
+        assert sanitize_k8s_name(sanitize_k8s_name(name)) == name
+
+
+# =============================================================================
 # Test construct_user_spark_connect_url
 # =============================================================================
 
@@ -193,6 +287,18 @@ class TestConstructUserSparkConnectUrl:
             url = construct_user_spark_connect_url("testuser")
 
         assert url == "sc://spark-notebook-testuser:15002"
+
+    def test_custom_template_sanitizes_username(self):
+        """Test that custom template sanitizes username with underscores."""
+        with patch.dict(
+            "os.environ",
+            {"SPARK_CONNECT_URL_TEMPLATE": "sc://spark-notebook-{username}:15002"},
+            clear=False,
+        ):
+            url = construct_user_spark_connect_url("test_user")
+
+        # Username should be sanitized (underscores → hyphens)
+        assert url == "sc://spark-notebook-test-user:15002"
 
     def test_kubernetes_url_default_dev(self):
         """Test Kubernetes URL construction with default dev environment."""
@@ -235,6 +341,69 @@ class TestConstructUserSparkConnectUrl:
     def test_spark_connect_port_constant(self):
         """Test that SPARK_CONNECT_PORT is correct."""
         assert SPARK_CONNECT_PORT == "15002"
+
+    def test_kubernetes_url_sanitizes_username_with_underscores(self):
+        """Test that Kubernetes URL sanitizes usernames with underscores."""
+        with patch(
+            "os.getenv",
+            side_effect=lambda k, d=None: None
+            if k == "SPARK_CONNECT_URL_TEMPLATE"
+            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+        ):
+            url = construct_user_spark_connect_url("tian_gu_test")
+
+        # Username should be sanitized (tian_gu_test → tian-gu-test)
+        assert url == "sc://jupyter-tian-gu-test.jupyterhub-dev:15002"
+
+    def test_kubernetes_url_sanitizes_mixed_case_username(self):
+        """Test that Kubernetes URL sanitizes mixed-case usernames."""
+        with patch(
+            "os.getenv",
+            side_effect=lambda k, d=None: None
+            if k == "SPARK_CONNECT_URL_TEMPLATE"
+            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+        ):
+            url = construct_user_spark_connect_url("Jeff_Cohere")
+
+        # Username should be sanitized and lowercased
+        assert url == "sc://jupyter-jeff-cohere.jupyterhub-dev:15002"
+
+    def test_kubernetes_url_preserves_dns_compliant_username(self):
+        """Test that DNS-compliant usernames are preserved as-is."""
+        with patch(
+            "os.getenv",
+            side_effect=lambda k, d=None: None
+            if k == "SPARK_CONNECT_URL_TEMPLATE"
+            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+        ):
+            url = construct_user_spark_connect_url("tgu2")
+
+        # DNS-compliant username should be unchanged
+        assert url == "sc://jupyter-tgu2.jupyterhub-dev:15002"
+
+    def test_kubernetes_url_prod_with_sanitization(self):
+        """Test Kubernetes URL with prod environment and username sanitization."""
+        with patch(
+            "os.getenv",
+            side_effect=lambda k, d=None: None
+            if k == "SPARK_CONNECT_URL_TEMPLATE"
+            else ("prod" if k == "K8S_ENVIRONMENT" else d),
+        ):
+            url = construct_user_spark_connect_url("user_name_test")
+
+        assert url == "sc://jupyter-user-name-test.jupyterhub-prod:15002"
+
+    def test_kubernetes_url_stage_with_sanitization(self):
+        """Test Kubernetes URL with stage environment and username sanitization."""
+        with patch(
+            "os.getenv",
+            side_effect=lambda k, d=None: None
+            if k == "SPARK_CONNECT_URL_TEMPLATE"
+            else ("stage" if k == "K8S_ENVIRONMENT" else d),
+        ):
+            url = construct_user_spark_connect_url("test_user")
+
+        assert url == "sc://jupyter-test-user.jupyterhub-stage:15002"
 
 
 # =============================================================================
