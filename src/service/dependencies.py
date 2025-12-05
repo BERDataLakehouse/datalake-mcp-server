@@ -5,6 +5,7 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
+import re
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,36 @@ auth = KBaseHTTPBearer()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def sanitize_k8s_name(name: str) -> str:
+    """
+    Sanitize a string to be Kubernetes DNS-1123 subdomain compliant.
+
+    Kubernetes resource names must:
+    - Consist of lowercase alphanumeric characters, '-', or '.'
+    - Start and end with an alphanumeric character
+    - Be at most 253 characters long
+
+    Args:
+        name: The string to sanitize (e.g., username with underscores)
+
+    Returns:
+        A DNS-1123 compliant string (replaces underscores with hyphens)
+    """
+    # Replace underscores and other invalid characters with hyphens
+    sanitized = re.sub(r"[^a-z0-9.-]", "-", name.lower())
+
+    # Ensure it starts and ends with alphanumeric
+    sanitized = re.sub(r"^[^a-z0-9]+", "", sanitized)
+    sanitized = re.sub(r"[^a-z0-9]+$", "", sanitized)
+
+    # Collapse multiple consecutive hyphens
+    sanitized = re.sub(r"-+", "-", sanitized)
+
+    # Truncate to 253 characters (K8s limit)
+    return sanitized[:253]
+
 
 DEFAULT_SPARK_POOL = "default"
 SPARK_CONNECT_PORT = "15002"
@@ -111,13 +142,13 @@ def construct_user_spark_connect_url(username: str) -> str:
     In BERDL, each user has their own notebook pod with a Spark Connect server.
     The URL pattern differs between environments:
     - Docker Compose (local dev): sc://spark-notebook:15002 or sc://spark-notebook-{username}:15002
-    - Kubernetes (prod/stage/dev): sc://jupyter-{username}.jupyterhub-{env}:15002
+    - Kubernetes (prod/stage/dev): sc://jupyter-{sanitized-username}.jupyterhub-{env}:15002
 
     Args:
-        username: KBase username
+        username: KBase username (may contain underscores or special characters)
 
     Returns:
-        User-specific Spark Connect URL
+        User-specific Spark Connect URL with DNS-safe username
 
     Notes:
         For docker-compose local development, service names don't follow the username pattern.
@@ -125,6 +156,9 @@ def construct_user_spark_connect_url(username: str) -> str:
 
         For Kubernetes, the MCP server is in namespace (dev/prod/stage) and notebooks are in
         namespace (jupyterhub-dev/jupyterhub-prod/jupyterhub-stage), so we need cross-namespace DNS.
+
+        IMPORTANT: The username is sanitized to be DNS-1123 compliant (underscores → hyphens)
+        to match the Kubernetes Service name created by JupyterHub.
     """
     # Check if there's a custom template (useful for docker-compose)
     template = os.getenv("SPARK_CONNECT_URL_TEMPLATE")
@@ -133,19 +167,29 @@ def construct_user_spark_connect_url(username: str) -> str:
         # Template should contain {username} placeholder
         # Example: "sc://spark-notebook:15002" (no placeholder = shared)
         # Example: "sc://spark-notebook-{username}:15002"
-        url = template.format(username=username)
-        logger.info(f"Using custom Spark Connect URL template: {url}")
+        # Note: For templates, we use the sanitized username to match Kubernetes Service names
+        sanitized_username = sanitize_k8s_name(username)
+        url = template.format(username=sanitized_username)
+        logger.info(
+            f"Using custom Spark Connect URL template: {url} (username: {username} → {sanitized_username})"
+        )
         return url
 
     # For Kubernetes: need to determine the environment and construct cross-namespace DNS
     # Environment can be dev, prod, or stage
     k8s_env = os.getenv("K8S_ENVIRONMENT", "dev")  # Default to dev if not specified
 
+    # Sanitize username for DNS-1123 compliance (e.g., tian_gu_test → tian-gu-test)
+    # This must match the Service name created by JupyterHub's spark_connect_service.py
+    sanitized_username = sanitize_k8s_name(username)
+
     # Cross-namespace DNS pattern: {service}.{namespace}.svc.cluster.local
     # But short form works too: {service}.{namespace}
     notebook_namespace = f"jupyterhub-{k8s_env}"
-    url = f"sc://jupyter-{username}.{notebook_namespace}:{SPARK_CONNECT_PORT}"
-    logger.info(f"Using Kubernetes cross-namespace Spark Connect URL: {url}")
+    url = f"sc://jupyter-{sanitized_username}.{notebook_namespace}:{SPARK_CONNECT_PORT}"
+    logger.info(
+        f"Using Kubernetes cross-namespace Spark Connect URL: {url} (username: {username} → {sanitized_username})"
+    )
     return url
 
 
