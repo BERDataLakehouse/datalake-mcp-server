@@ -80,16 +80,15 @@ def read_user_minio_credentials(username: str) -> tuple[str, str]:
         FileNotFoundError: If credentials file doesn't exist
         ValueError: If credentials file is malformed
     """
-    sanitized_username = sanitize_k8s_name(username)
     # Construct path to credentials file
-    creds_path = Path(f"/home/{sanitized_username}/.berdl_minio_credentials")
+    creds_path = Path(f"/home/{username}/.berdl_minio_credentials")
 
     logger.debug(f"Reading MinIO credentials from: {creds_path}")
 
     if not creds_path.exists():
         raise FileNotFoundError(
             f"MinIO credentials file not found at {creds_path}. "
-            f"User {sanitized_username} must have .berdl_minio_credentials in their home directory."
+            f"User {username} must have .berdl_minio_credentials in their home directory."
         )
 
     try:
