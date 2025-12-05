@@ -104,9 +104,7 @@ def read_user_minio_credentials(username: str) -> tuple[str, str]:
                 f'Expected: {{"username": "user", "access_key": "key", "secret_key": "secret"}}'
             )
 
-        logger.info(
-            f"Successfully loaded MinIO credentials for user: {username}"
-        )
+        logger.info(f"Successfully loaded MinIO credentials for user: {username}")
         return access_key, secret_key
 
     except json.JSONDecodeError as e:
