@@ -105,14 +105,14 @@ def read_user_minio_credentials(username: str) -> tuple[str, str]:
             )
 
         logger.info(
-            f"Successfully loaded MinIO credentials for user: {sanitized_username}"
+            f"Successfully loaded MinIO credentials for user: {username}"
         )
         return access_key, secret_key
 
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to parse MinIO credentials file {creds_path}: {e}")
     except Exception as e:
-        logger.error(f"Error reading MinIO credentials for {sanitized_username}: {e}")
+        logger.error(f"Error reading MinIO credentials for {username}: {e}")
         raise
 
 
