@@ -12,15 +12,19 @@ A FastAPI-based service that enables AI assistants to interact with Delta Lake t
 
 ## Documentation
 
-For detailed documentation, please refer to the [User Guide](docs/guide/user_guide.md). The guide covers:
+### Guides
 
+**[User Guide](docs/guide/user_guide.md)** - Complete documentation for setting up and using the MCP server:
 - [Quick Start](docs/guide/user_guide.md#quick-start) - Bring the local service up and running
 - [Creating Sample Delta Tables](docs/guide/user_guide.md#creating-sample-delta-tables) - Set up local test data
 - [Using the API](docs/guide/user_guide.md#using-the-api) - Direct API usage examples
 - [AI Assistant Integration](docs/guide/user_guide.md#ai-assistant-integration) - Configure and use with MCP Host tools
-  - [MCP Configuration](docs/guide/user_guide.md#mcp-configuration) - Create `mcp.json`
-  - [MCP Host Setup](docs/guide/user_guide.md#mcp-host-setup) - Configure MCP Host
-  - [Example Prompts](docs/guide/user_guide.md#example-prompts) - Natural language examples
+
+**[Claude Code Guide](docs/guide/claude_code_guide.md)** - Using the BERDL MCP server with Claude Code CLI:
+- Connect Claude Code to the BERDL data lake
+- Query your Delta Lake tables using natural language
+- Step-by-step setup and troubleshooting
+- Best practices and example queries
 
 ## Quick Start
 

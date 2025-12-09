@@ -372,7 +372,7 @@ sudo ssh -fN \
 
 Replace `<ac.anl_username>` with your actual ANL username.
 
-For more information on SSH tunnels, refer to the [BERDL JupyterHub User Guide](https://github.com/BERDataLakehouse/BERDL_JupyterHub/blob/main/docs/user_guide.md#1-create-ssh-tunnel).
+For more information on SSH tunnels, refer to the [Setting Up SSH Tunnel User Guide](https://github.com/BERDataLakehouse/spark_notebook/blob/main/docs/minio_guide.md#setting-up-ssh-tunnel).
 
 ### Step 2: Update MCP Configuration
 Create or update your MCP configuration file at `~/.mcp/mcp.json`:
@@ -383,11 +383,11 @@ Create or update your MCP configuration file at `~/.mcp/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "delta-lake-mcp": {
-      "url": "https://cdmhub.ci.kbase.us/apis/mcp/mcp",
-      "enabled": true,
+    "berdl-datalake": {
+      "type": "sse",
+      "url": "https://hub.berdl.kbase.us/apis/mcp/mcp",
       "headers": {
-        "Authorization": "Bearer YOUR_CI_KBASE_AUTH_TOKEN"
+        "Authorization": "Bearer YOUR_KBASE_AUTH_TOKEN"
       }
     }
   }
@@ -404,7 +404,7 @@ Error invoking remote method 'mcp:list-tools': Error:
 [MCP] Error activating server CDM MCP Server: SSE error: TypeError: fetch failed: unable to verify the first certificate
 ```
 
-This happens because the SSH tunnel creates a localhost connection, but the SSL certificate is issued for `cdmhub.ci.kbase.us`, causing certificate verification to fail.
+This happens because the SSH tunnel creates a localhost connection, but the SSL certificate is issued for `hub.berdl.kbase.us/apis/mcp/mcp`, causing certificate verification to fail.
 
 **Solution for Cherry Studio (macOS):**
 
