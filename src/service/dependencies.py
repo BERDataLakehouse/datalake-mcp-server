@@ -378,7 +378,9 @@ def get_spark_session(
         # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
-                app_name = spark.sparkContext.appName if spark.sparkContext else "unknown"
+                app_name = (
+                    spark.sparkContext.appName if spark.sparkContext else "unknown"
+                )
                 # Get username from request state (already extracted earlier in try block)
                 try:
                     current_user = get_user_from_request(request)

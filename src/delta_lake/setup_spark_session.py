@@ -544,7 +544,9 @@ def get_spark_session(
                 if active_session:
                     active_session.stop()
                 spark = builder.config(conf=spark_conf).create()
-                logger.info("Successfully created session after stopping lingering session")
+                logger.info(
+                    "Successfully created session after stopping lingering session"
+                )
         else:
             # Use the same builder instance that we cleared
             logger.debug("Using getOrCreate() for session (backwards compatibility)")
