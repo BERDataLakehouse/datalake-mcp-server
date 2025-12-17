@@ -326,6 +326,8 @@ def get_spark_session(
                 app_name=f"datalake_mcp_server_{username}",
                 settings=user_settings,
                 use_spark_connect=True,
+                # Spark Connect sessions are isolated per user, no need to force new
+                force_new_session=False,
             )
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
@@ -358,10 +360,14 @@ def get_spark_session(
                 app_name=f"datalake_mcp_server_{username}_{timestamp}",
                 settings=fallback_settings,
                 use_spark_connect=False,
+                # CRITICAL: Force new session for shared cluster to prevent credential leakage!
+                # Without this, User 2 would reuse User 1's session with User 1's MinIO creds
+                force_new_session=True,
             )
 
             logger.info(
-                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
+                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url} "
+                f"(MinIO access key: {minio_access_key[:10]}...)"
             )
 
         # Yield the spark session to the endpoint
@@ -369,11 +375,23 @@ def get_spark_session(
         yield spark
 
     finally:
-        # Always stop the session, even if an exception occurred
+        # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
-                logger.info("Stopping Spark session (cleanup)")
+                app_name = spark.sparkContext.appName if spark.sparkContext else "unknown"
+                # Get username from request state (already extracted earlier in try block)
+                try:
+                    current_user = get_user_from_request(request)
+                except Exception:
+                    current_user = "unknown"
+
+                logger.info(
+                    f"Stopping Spark session (cleanup) - app={app_name}, user={current_user}"
+                )
                 spark.stop()
-                logger.debug("Spark session stopped successfully")
+                logger.info(f"✓ Spark session stopped successfully: {app_name}")
             except Exception as e:
-                logger.error(f"Error stopping Spark session: {e}", exc_info=True)
+                logger.error(
+                    f"Error stopping Spark session: {e}",
+                    exc_info=True,
+                )

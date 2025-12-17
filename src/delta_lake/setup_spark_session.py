@@ -416,6 +416,7 @@ def get_spark_session(
     tenant_name: str | None = None,
     use_spark_connect: bool = True,
     override: dict[str, Any] | None = None,
+    force_new_session: bool = False,
 ) -> SparkSession:
     """
     Create and configure a Spark session with BERDL-specific settings.
@@ -436,6 +437,9 @@ def get_spark_session(
                      of the user's personal warehouse.
         use_spark_connect: If True, uses Spark Connect instead of legacy mode
         override: dictionary of tag-value pairs to replace the values in the generated spark conf (e.g. for testing)
+        force_new_session: If True, stops any active session and creates a fresh one.
+                          Critical for multi-user shared cluster to prevent credential leakage.
+                          Default: False (uses getOrCreate for backwards compatibility)
 
     Returns:
         Configured SparkSession instance
@@ -456,6 +460,9 @@ def get_spark_session(
 
         >>> # Local development
         >>> spark = get_spark_session("TestApp", local=True)
+
+        >>> # Multi-user shared service (force new session per request)
+        >>> spark = get_spark_session("MyApp", force_new_session=True)
     """
     config = generate_spark_conf(
         app_name,
@@ -478,7 +485,7 @@ def get_spark_session(
     #
     # 1. Clearing environment variables (os.environ modifications)
     # 2. Clearing builder._options
-    # 3. Creating SparkConf and calling getOrCreate()
+    # 3. Creating SparkConf and calling getOrCreate() or create()
     #
     # Without this lock, concurrent requests can cause:
     # - Environment variable corruption between threads
@@ -487,6 +494,21 @@ def get_spark_session(
     # ==========================================================================
     with _spark_session_lock:
         logger.debug("Acquired Spark session creation lock")
+
+        # RECOMMENDATION 2: Stop any active session before creating a new one
+        # This prevents credential leakage in multi-user shared cluster scenarios
+        if force_new_session:
+            active_session = SparkSession.getActiveSession()
+            if active_session is not None:
+                logger.info(
+                    f"Force new session requested: stopping active session "
+                    f"(app={active_session.sparkContext.appName})"
+                )
+                try:
+                    active_session.stop()
+                    logger.info("Active session stopped successfully")
+                except Exception as e:
+                    logger.warning(f"Error stopping active session: {e}", exc_info=True)
 
         # Clean environment before creating session
         # PySpark 3.4+ uses environment variables to determine mode
@@ -501,10 +523,34 @@ def get_spark_session(
         # from any existing JVM (e.g., spark.master from a previous session).
         spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
 
-        # Use the same builder instance that we cleared
-        spark = builder.config(conf=spark_conf).getOrCreate()
+        # RECOMMENDATION 1: Use .create() instead of .getOrCreate() for multi-user mode
+        # .getOrCreate() returns existing session even if configs differ (credential leak!)
+        # .create() forces new session but fails if one already exists
+        if force_new_session:
+            try:
+                logger.info("Creating new Spark session (force_new_session=True)")
+                spark = builder.config(conf=spark_conf).create()
+                logger.info(
+                    f"New Spark session created: app={spark.sparkContext.appName}, "
+                    f"user={config.get('spark.hadoop.fs.s3a.access.key', 'N/A')[:10]}..."
+                )
+            except Exception as e:
+                # If .create() fails (session still exists), fall back to stop+create
+                logger.warning(
+                    f"Failed to create new session (.create() failed): {e}. "
+                    "Attempting to stop any lingering session and retry..."
+                )
+                active_session = SparkSession.getActiveSession()
+                if active_session:
+                    active_session.stop()
+                spark = builder.config(conf=spark_conf).create()
+                logger.info("Successfully created session after stopping lingering session")
+        else:
+            # Use the same builder instance that we cleared
+            logger.debug("Using getOrCreate() for session (backwards compatibility)")
+            spark = builder.config(conf=spark_conf).getOrCreate()
 
-        logger.debug("Spark session created, releasing lock")
+        logger.debug("Spark session creation complete, releasing lock")
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     # This can be done outside the lock as it operates on the session instance
