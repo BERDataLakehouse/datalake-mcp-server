@@ -375,11 +375,20 @@ def get_spark_session(
         yield spark
 
     finally:
+        # RECOMMENDATION 3: Always stop the session with enhanced logging
         # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
+                # Safe access to app name (sparkContext not available in Spark Connect mode)
                 spark_context = getattr(spark, "sparkContext", None)
-                app_name = spark_context.appName if spark_context is not None else "unknown"
+                if spark_context is not None:
+                    try:
+                        app_name = spark_context.appName
+                    except Exception:
+                        app_name = "unknown (legacy mode - sparkContext error)"
+                else:
+                    app_name = "unknown (Spark Connect mode)"
+
                 # Get username from request state (already extracted earlier in try block)
                 try:
                     current_user = get_user_from_request(request)

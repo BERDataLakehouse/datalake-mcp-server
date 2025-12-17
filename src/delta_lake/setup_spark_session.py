@@ -500,9 +500,14 @@ def get_spark_session(
         if force_new_session:
             active_session = SparkSession.getActiveSession()
             if active_session is not None:
+                # Safe access to app name (sparkContext not available in Spark Connect)
+                try:
+                    app_name = active_session.sparkContext.appName
+                except Exception:
+                    app_name = "unknown (Spark Connect mode)"
+
                 logger.info(
-                    f"Force new session requested: stopping active session "
-                    f"(app={active_session.sparkContext.appName})"
+                    f"Force new session requested: stopping active session (app={app_name})"
                 )
                 try:
                     active_session.stop()
@@ -530,8 +535,15 @@ def get_spark_session(
             try:
                 logger.info("Creating new Spark session (force_new_session=True)")
                 spark = builder.config(conf=spark_conf).create()
+
+                # Safe access to app name (sparkContext not available in Spark Connect)
+                try:
+                    app_name = spark.sparkContext.appName
+                except Exception:
+                    app_name = config.get("spark.app.name", "unknown")
+
                 logger.info(
-                    f"New Spark session created: app={spark.sparkContext.appName}, "
+                    f"New Spark session created: app={app_name}, "
                     f"user={config.get('spark.hadoop.fs.s3a.access.key', 'N/A')[:10]}..."
                 )
             except Exception as e:
