@@ -15,7 +15,6 @@ import os
 import re
 import socket
 import threading
-import time
 import warnings
 from datetime import datetime
 from typing import Any
@@ -422,7 +421,6 @@ def get_spark_session(
     tenant_name: str | None = None,
     use_spark_connect: bool = True,
     override: dict[str, Any] | None = None,
-    force_new_session: bool = False,
 ) -> SparkSession:
     """
     Create and configure a Spark session with BERDL-specific settings.
@@ -443,9 +441,6 @@ def get_spark_session(
                      of the user's personal warehouse.
         use_spark_connect: If True, uses Spark Connect instead of legacy mode
         override: dictionary of tag-value pairs to replace the values in the generated spark conf (e.g. for testing)
-        force_new_session: If True, stops any active session and creates a fresh one.
-                          Critical for multi-user shared cluster to prevent credential leakage.
-                          Default: False (uses getOrCreate for backwards compatibility)
 
     Returns:
         Configured SparkSession instance
@@ -466,9 +461,6 @@ def get_spark_session(
 
         >>> # Local development
         >>> spark = get_spark_session("TestApp", local=True)
-
-        >>> # Multi-user shared service (force new session per request)
-        >>> spark = get_spark_session("MyApp", force_new_session=True)
     """
     config = generate_spark_conf(
         app_name,
@@ -491,7 +483,7 @@ def get_spark_session(
     #
     # 1. Clearing environment variables (os.environ modifications)
     # 2. Clearing builder._options
-    # 3. Creating SparkConf and calling getOrCreate() or create()
+    # 3. Creating SparkConf and calling getOrCreate()
     #
     # Without this lock, concurrent requests can cause:
     # - Environment variable corruption between threads
@@ -500,85 +492,6 @@ def get_spark_session(
     # ==========================================================================
     with _spark_session_lock:
         logger.debug("Acquired Spark session creation lock")
-
-        # RECOMMENDATION 2: Stop any active session before creating a new one
-        # This prevents credential leakage in multi-user shared cluster scenarios
-        if force_new_session:
-            active_session = SparkSession.getActiveSession()
-            logger.info(
-                f"Checking for active session: {active_session is not None} "
-                f"(session={active_session})"
-            )
-            if active_session is not None:
-                # Safe access to app name (sparkContext not available in Spark Connect)
-                try:
-                    app_name = active_session.sparkContext.appName
-                except Exception:
-                    app_name = "unknown (Spark Connect mode)"
-
-                logger.info(
-                    f"Force new session requested: stopping active session (app={app_name})"
-                )
-                try:
-                    # Stop SparkSession
-                    active_session.stop()
-                    logger.info("SparkSession.stop() called")
-
-                    # CRITICAL: Also stop the underlying SparkContext
-                    # Sometimes stop() doesn't fully clean up the context
-                    try:
-                        spark_context = active_session.sparkContext
-                        if spark_context:
-                            # Check if context is still running (with safety checks)
-                            try:
-                                jsc = getattr(spark_context, "_jsc", None)
-                                if jsc is not None:
-                                    sc = jsc.sc()
-                                    if sc is not None and not sc.isStopped():
-                                        logger.warning(
-                                            "SparkContext still running after stop(), forcing stop..."
-                                        )
-                                        spark_context.stop()
-                                        logger.info("SparkContext.stop() called")
-                                else:
-                                    # Can't verify, try stopping anyway
-                                    logger.warning(
-                                        "Could not verify SparkContext state, forcing stop..."
-                                    )
-                                    spark_context.stop()
-                                    logger.info("SparkContext.stop() forced")
-                            except Exception:
-                                # If we can't check, try stopping anyway
-                                logger.warning(
-                                    "Error checking SparkContext state, forcing stop..."
-                                )
-                                try:
-                                    spark_context.stop()
-                                    logger.info(
-                                        "SparkContext.stop() forced after error"
-                                    )
-                                except Exception as stop_err:
-                                    logger.debug(
-                                        f"Failed to force stop SparkContext: {stop_err}"
-                                    )
-                    except Exception as ctx_err:
-                        logger.debug(f"Could not access/stop SparkContext: {ctx_err}")
-
-                    # Wait a moment for cleanup to complete
-                    time.sleep(0.5)
-
-                    # Verify it's really stopped
-                    verify_session = SparkSession.getActiveSession()
-                    if verify_session is not None:
-                        logger.error(
-                            "Session still active after stop()! Forcing null..."
-                        )
-                        SparkSession._instantiatedSession = None
-                        SparkSession._activeSession = None
-
-                    logger.info("Active session stopped and verified")
-                except Exception as e:
-                    logger.warning(f"Error stopping active session: {e}", exc_info=True)
 
         # Clean environment before creating session
         # PySpark 3.4+ uses environment variables to determine mode
@@ -594,12 +507,6 @@ def get_spark_session(
         spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
 
         spark = builder.config(conf=spark_conf).getOrCreate()
-
-        # Log credentials to verify correct user (only for force_new_session)
-        if force_new_session:
-            logger.info(
-                f"Spark session created with user={config.get('spark.hadoop.fs.s3a.access.key', 'N/A')[:10]}..."
-            )
 
         logger.debug("Spark session creation complete, releasing lock")
 
