@@ -361,19 +361,29 @@ def get_spark_session(
             )
 
             logger.info(
-                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url}"
+                f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url} "
+                f"(MinIO access key: {minio_access_key[:10]}...)"
             )
 
         # Yield the spark session to the endpoint
-        logger.debug("Spark session created, yielding to endpoint")
         yield spark
 
     finally:
-        # Always stop the session, even if an exception occurred
+        # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
                 logger.info("Stopping Spark session (cleanup)")
+                # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
+                # This is a belt-and-suspenders approach alongside fs.s3a.impl.disable.cache
+                # In shared cluster mode, the S3A FileSystem caches credentials at JVM level
+                try:
+                    hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
+                    hadoop_fs.closeAll()
+                    logger.info("Cleared Hadoop FileSystem cache")
+                except Exception as fs_err:
+                    logger.info(f"Could not clear FileSystem cache: {fs_err}")
+
                 spark.stop()
-                logger.debug("Spark session stopped successfully")
+                logger.info("Spark session stopped successfully")
             except Exception as e:
                 logger.error(f"Error stopping Spark session: {e}", exc_info=True)
