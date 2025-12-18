@@ -491,7 +491,7 @@ def get_spark_session(
     # - Undefined behavior leading to service hangs
     # ==========================================================================
     with _spark_session_lock:
-        logger.debug("Acquired Spark session creation lock")
+        logger.info("Acquired Spark session creation lock")
 
         # Clean environment before creating session
         # PySpark 3.4+ uses environment variables to determine mode
@@ -506,9 +506,10 @@ def get_spark_session(
         # from any existing JVM (e.g., spark.master from a previous session).
         spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
 
+        # Use the same builder instance that we cleared
         spark = builder.config(conf=spark_conf).getOrCreate()
 
-        logger.debug("Spark session creation complete, releasing lock")
+        logger.info("Spark session creation complete, releasing lock")
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     # This can be done outside the lock as it operates on the session instance
