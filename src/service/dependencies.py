@@ -379,6 +379,19 @@ def get_spark_session(
         # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
+                # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
+                # This is a belt-and-suspenders approach alongside fs.s3a.impl.disable.cache
+                # In shared cluster mode, the S3A FileSystem caches credentials at JVM level
+                try:
+                    hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
+                    hadoop_fs.closeAll()
+                    logger.debug("Cleared Hadoop FileSystem cache")
+                except AttributeError:
+                    # Spark Connect mode doesn't have _jvm
+                    logger.debug("Skipping FileSystem cache clear (Spark Connect mode)")
+                except Exception as fs_err:
+                    logger.debug(f"Could not clear FileSystem cache: {fs_err}")
+
                 # Safe access to app name (sparkContext not available in Spark Connect mode)
                 spark_context = getattr(spark, "sparkContext", None)
                 if spark_context is not None:

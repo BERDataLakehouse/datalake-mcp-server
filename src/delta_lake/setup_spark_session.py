@@ -251,6 +251,11 @@ def _get_s3_conf(
         ).lower(),
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        # CRITICAL: Disable filesystem cache to prevent credential leakage between users
+        # Hadoop caches S3AFileSystem instances at the JVM level keyed by URI scheme.
+        # Without this, the first user's credentials are cached and reused for all
+        # subsequent users, causing 403 Access Denied errors in shared cluster mode.
+        "spark.hadoop.fs.s3a.impl.disable.cache": "true",
         "spark.sql.warehouse.dir": warehouse_dir,
         "spark.eventLog.enabled": "true",
         "spark.eventLog.dir": event_log_dir,
@@ -500,6 +505,10 @@ def get_spark_session(
         # This prevents credential leakage in multi-user shared cluster scenarios
         if force_new_session:
             active_session = SparkSession.getActiveSession()
+            logger.info(
+                f"Checking for active session: {active_session is not None} "
+                f"(session={active_session})"
+            )
             if active_session is not None:
                 # Safe access to app name (sparkContext not available in Spark Connect)
                 try:
