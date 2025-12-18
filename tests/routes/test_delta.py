@@ -31,6 +31,7 @@ from src.service.models import (
     JoinClause,
     OrderBySpec,
     PaginationInfo,
+    TableQueryResponse,
     TableSelectRequest,
     TableSelectResponse,
 )
@@ -497,11 +498,16 @@ class TestQueryTableEndpoint:
         """Test successful query execution."""
         client, spark, user = delta_client
 
-        query_result = [{"count": 100}]
+        query_response = TableQueryResponse(
+            result=[{"count": 100}],
+            pagination=PaginationInfo(
+                limit=1000, offset=0, total_count=1, has_more=False
+            ),
+        )
 
         with patch(
             "src.routes.delta.delta_service.query_delta_table",
-            return_value=query_result,
+            return_value=query_response,
         ):
             response = client.post(
                 "/delta/tables/query",
@@ -511,7 +517,9 @@ class TestQueryTableEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "result" in data
+        assert "pagination" in data
         assert data["result"][0]["count"] == 100
+        assert data["pagination"]["total_count"] == 1
 
 
 class TestSelectTableEndpoint:
@@ -755,9 +763,15 @@ class TestConcurrentRequests:
                 return ("sample", response.status_code)
 
             elif request_type == "query":
+                query_response = TableQueryResponse(
+                    result=[],
+                    pagination=PaginationInfo(
+                        limit=1000, offset=0, total_count=0, has_more=False
+                    ),
+                )
                 with patch(
                     "src.routes.delta.delta_service.query_delta_table",
-                    return_value=[],
+                    return_value=query_response,
                 ):
                     response = client.post(
                         "/delta/tables/query",

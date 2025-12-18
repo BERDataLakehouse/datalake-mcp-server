@@ -141,6 +141,18 @@ class TableQueryRequest(BaseModel):
     """Request model for querying a Delta table."""
 
     query: Annotated[str, Field(description="SQL query to execute against the table")]
+    limit: Annotated[
+        int,
+        Field(
+            description="Maximum number of rows to return",
+            gt=0,
+            le=50000,
+        ),
+    ] = 1000
+    offset: Annotated[
+        int,
+        Field(description="Number of rows to skip for pagination", ge=0),
+    ] = 0
 
 
 class TableQueryResponse(BaseModel):
@@ -150,6 +162,7 @@ class TableQueryResponse(BaseModel):
         List[Any],
         Field(description="List of rows returned by the query, each as a dictionary"),
     ]
+    pagination: Annotated["PaginationInfo", Field(description="Pagination metadata")]
 
 
 class TableCountRequest(BaseModel):

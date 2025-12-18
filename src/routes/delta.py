@@ -222,8 +222,12 @@ def sample_table(
     "/tables/query",
     response_model=TableQueryResponse,
     status_code=status.HTTP_200_OK,
-    summary="Query a Delta table",
-    description="Executes a SQL query against a specified Delta table.",
+    summary="Query Delta tables with pagination",
+    description=(
+        "Executes a SQL query against Delta tables with pagination support. "
+        "Returns query results along with pagination metadata including total count. "
+        "Use limit and offset parameters to paginate through large result sets."
+    ),
     operation_id="query_delta_table",
 )
 def query_table(
@@ -232,13 +236,14 @@ def query_table(
     auth=Depends(auth),
 ) -> TableQueryResponse:
     """
-    Endpoint to execute a query against a specific Delta table.
+    Endpoint to execute a query against Delta tables with pagination support.
     """
-    result: List[Dict[str, Any]] = delta_service.query_delta_table(
+    return delta_service.query_delta_table(
         spark=spark,
         query=request.query,
+        limit=request.limit,
+        offset=request.offset,
     )
-    return TableQueryResponse(result=result)
 
 
 @router.post(

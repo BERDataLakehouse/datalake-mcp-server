@@ -786,23 +786,32 @@ class TestSampleDeltaTable:
 class TestQueryDeltaTable:
     """Tests for query_delta_table function with mocked Spark."""
 
-    def test_query_returns_results(self, mock_spark_session):
-        """Test that query_delta_table returns query results."""
+    def test_query_returns_results_skips_count(self, mock_spark_session):
+        """Test that query skips COUNT when results < limit."""
         test_data = [{"count": 100}]
         spark = mock_spark_session(sql_results=test_data)
 
         with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
             with patch("src.delta_lake.delta_service._store_in_cache"):
                 with patch(
-                    "src.delta_lake.delta_service.run_with_timeout",
-                    side_effect=lambda func, **kwargs: func(),
-                ):
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    # Only data query runs - 1 result < 1000 limit, so COUNT is skipped
+                    mock_timeout.side_effect = [
+                        test_data,  # Data query result (only call)
+                    ]
                     result = delta_service.query_delta_table(
                         spark, "SELECT COUNT(*) as count FROM users", use_cache=False
                     )
 
-        assert len(result) == 1
-        assert result[0]["count"] == 100
+        # COUNT was skipped, so total_count = offset (0) + len(results) (1)
+        assert result.result[0]["count"] == 100
+        assert result.pagination.total_count == 1
+        assert result.pagination.limit == 1000  # default
+        assert result.pagination.offset == 0  # default
+        assert result.pagination.has_more is False
+        # Verify only 1 call was made (no COUNT query)
+        assert mock_timeout.call_count == 1
 
     def test_query_invalid_sql_rejected(self, mock_spark_session):
         """Test that invalid SQL is rejected."""
@@ -811,28 +820,55 @@ class TestQueryDeltaTable:
         with pytest.raises(SparkQueryError):
             delta_service.query_delta_table(spark, "DROP TABLE users")
 
-    def test_query_adds_limit_when_missing(self, mock_spark_session):
-        """Test that query gets LIMIT added when missing."""
+    def test_query_with_pagination_runs_count(self, mock_spark_session):
+        """Test query runs COUNT when page is full."""
         spark = mock_spark_session()
+
+        # Return exactly 10 results (== limit), so COUNT query will run
+        data_results = [{"id": i} for i in range(10)]
+
+        count_row = MagicMock()
+        count_row.__getitem__ = lambda self, key: 500 if key == "cnt" else None
 
         with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
             with patch("src.delta_lake.delta_service._store_in_cache"):
                 with patch(
-                    "src.delta_lake.delta_service.run_with_timeout",
-                    side_effect=lambda func, **kwargs: func(),
-                ):
-                    delta_service.query_delta_table(
-                        spark, "SELECT * FROM users", use_cache=False
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    # Data query first, then count query (because results == limit)
+                    mock_timeout.side_effect = [
+                        data_results,  # Data query returns 10 rows
+                        [count_row],  # Count query runs because page is full
+                    ]
+                    result = delta_service.query_delta_table(
+                        spark,
+                        "SELECT * FROM users",
+                        limit=10,
+                        offset=20,
+                        use_cache=False,
                     )
 
-        # Verify sql was called with LIMIT
-        call_args = spark.sql.call_args[0][0]
-        assert "LIMIT" in call_args
+        assert result.pagination.limit == 10
+        assert result.pagination.offset == 20
+        assert result.pagination.total_count == 500
+        assert result.pagination.has_more is True
+        # Verify 2 calls were made (data + count)
+        assert mock_timeout.call_count == 2
 
     def test_query_uses_cache(self, mock_spark_session):
         """Test that query uses cached results."""
         spark = mock_spark_session()
-        cached_data = [{"id": 1}]
+        cached_data = [
+            {
+                "result": [{"id": 1}],
+                "pagination": {
+                    "limit": 1000,
+                    "offset": 0,
+                    "total_count": 1,
+                    "has_more": False,
+                },
+            }
+        ]
 
         with patch(
             "src.delta_lake.delta_service._get_from_cache", return_value=cached_data
@@ -841,7 +877,8 @@ class TestQueryDeltaTable:
                 spark, "SELECT * FROM users", use_cache=True
             )
 
-        assert result == cached_data
+        assert result.result == [{"id": 1}]
+        assert result.pagination.total_count == 1
         spark.sql.assert_not_called()
 
     def test_query_timeout_raises_error(self, mock_spark_session):
@@ -1042,15 +1079,18 @@ class TestConcurrentQueries:
             ):
                 with patch("src.delta_lake.delta_service._store_in_cache"):
                     with patch(
-                        "src.delta_lake.delta_service.run_with_timeout",
-                        side_effect=lambda func, **kwargs: func(),
-                    ):
+                        "src.delta_lake.delta_service.run_with_timeout"
+                    ) as mock_timeout:
+                        # Only data query runs since 1 result < 1000 limit
+                        mock_timeout.side_effect = [
+                            [{"id": i}],  # Data query only
+                        ]
                         result = delta_service.query_delta_table(
                             spark,
                             f"SELECT {i} as id FROM dual",
                             use_cache=False,
                         )
-                        return result[0]["id"]
+                        return result.result[0]["id"]
 
         args_list = [(i,) for i in range(5)]
         results, exceptions = concurrent_executor(query_with_timeout, args_list)
