@@ -470,7 +470,7 @@ def query_delta_table(
                 logger.info(f"Cache hit for count: {total_count}")
             else:
                 # Execute COUNT query
-                count_query = f"SELECT COUNT(*) as cnt FROM ({base_query})"
+                count_query = f"SELECT COUNT(*) as cnt FROM ({base_query}) AS subquery"
                 logger.info("Executing count query for pagination")
 
                 count_result = run_with_timeout(
