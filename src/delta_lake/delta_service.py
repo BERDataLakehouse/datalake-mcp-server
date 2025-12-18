@@ -27,6 +27,7 @@ from src.service.models import (
     FilterCondition,
     JoinClause,
     PaginationInfo,
+    TableQueryResponse,
     TableSelectRequest,
     TableSelectResponse,
 )
@@ -348,21 +349,32 @@ def sample_delta_table(
 
 
 def query_delta_table(
-    spark: SparkSession, query: str, use_cache: bool = True
-) -> List[Dict[str, Any]]:
+    spark: SparkSession,
+    query: str,
+    limit: int = 1000,
+    offset: int = 0,
+    use_cache: bool = True,
+) -> TableQueryResponse:
     """
-    Executes a SQL query against a specific Delta table after basic validation.
+    Executes a SQL query against Delta tables with pagination support.
 
-    Note: Queries are automatically limited to MAX_QUERY_ROWS (50,000) to prevent
-    OOM errors. If your query needs more rows, use pagination via the select endpoint.
+    The query is validated for safety, then wrapped to support pagination.
+    The data query is executed first, and a COUNT query is only executed if
+    the page is full (to determine if more pages exist). This optimization
+    skips the expensive COUNT when results are smaller than the limit.
+
+    Note: Any LIMIT/OFFSET clauses in the user's query are stripped and replaced
+    with the pagination parameters. The limit/offset parameters always take precedence.
 
     Args:
         spark: The SparkSession object.
         query: The SQL query string to execute.
+        limit: Maximum number of rows to return (default: 1000, max: 50000).
+        offset: Number of rows to skip for pagination (default: 0).
         use_cache: Whether to use the redis cache to store the result.
 
     Returns:
-        A list of dictionaries, where each dictionary represents a row.
+        TableQueryResponse with result data and pagination info.
 
     Raises:
         SparkQueryError: If query validation fails or LIMIT exceeds MAX_QUERY_ROWS
@@ -371,25 +383,65 @@ def query_delta_table(
     # Validate query structure first
     _check_query_is_valid(query)
 
-    # Enforce row limit to prevent OOM
-    query = _enforce_query_limit(query, MAX_QUERY_ROWS)
+    # Enforce max limit
+    if limit > MAX_QUERY_ROWS:
+        raise SparkQueryError(
+            f"Limit ({limit}) exceeds maximum allowed ({MAX_QUERY_ROWS}). "
+            f"Please reduce your limit."
+        )
+
+    # Strip any existing LIMIT/OFFSET from user query since we'll add our own
+    # Pagination parameters always override any LIMIT/OFFSET in the query
+    base_query = query.rstrip().rstrip(";")
+
+    # Remove trailing LIMIT and/or OFFSET clauses (we'll add our own)
+    # Handles: "LIMIT n", "LIMIT n OFFSET m", "OFFSET m" (rare but possible)
+    base_query = re.sub(
+        r"\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?\s*$", "", base_query, flags=re.IGNORECASE
+    )
+    base_query = re.sub(r"\s+OFFSET\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
+
+    # Warn if using offset without ORDER BY - results will be non-deterministic
+    if offset > 0:
+        has_order_by = bool(
+            re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE)
+        )
+        if not has_order_by:
+            logger.warning(
+                f"Pagination with offset={offset} but query has no ORDER BY clause. "
+                "Results may be non-deterministic across pages. "
+                "Add ORDER BY to ensure consistent pagination."
+            )
 
     namespace = "query"
-    params = {"query": query}
+    params = {"query": base_query, "limit": limit, "offset": offset}
     cache_key = _generate_cache_key(params)
+
+    # Separate cache key for count (independent of limit/offset for reuse across pages)
+    count_namespace = "query_count"
+    count_cache_key = _generate_cache_key({"query": base_query})
 
     if use_cache:
         cached_result = _get_from_cache(namespace, cache_key)
         if cached_result:
             logger.info(
-                f"Cache hit for query: {query[:50]}{'...' if len(query) > 50 else ''}"
+                f"Cache hit for query: {base_query[:50]}{'...' if len(base_query) > 50 else ''}"
             )
-            return cached_result
+            # Reconstruct response from cached data
+            return TableQueryResponse(
+                result=cached_result[0]["result"],
+                pagination=PaginationInfo(**cached_result[0]["pagination"]),
+            )
 
-    logger.info(f"Executing validated query: {query}")
+    logger.info(f"Executing paginated query: {base_query[:100]}...")
+
     try:
-        df = spark.sql(query)
-        # Use timeout wrapper for collect operation
+        # Execute the paginated data query FIRST
+        # This allows us to skip the COUNT query if we get fewer rows than limit
+        paginated_query = f"{base_query} LIMIT {limit} OFFSET {offset}"
+        logger.info(f"Executing data query with LIMIT {limit} OFFSET {offset}")
+
+        df = spark.sql(paginated_query)
         results = run_with_timeout(
             lambda: [row.asDict() for row in df.collect()],
             timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
@@ -397,12 +449,71 @@ def query_delta_table(
         )
         logger.info(f"Query returned {len(results)} rows.")
 
-        if use_cache:
-            _store_in_cache(namespace, cache_key, results)
+        # Optimization: If we got fewer rows than limit, we know the exact total
+        # without executing an expensive COUNT query
+        if len(results) < limit:
+            total_count = offset + len(results)
+            has_more = False
+            logger.info(
+                f"Skipped COUNT query: results ({len(results)}) < limit ({limit}), "
+                f"total_count={total_count}"
+            )
+        else:
+            # We filled the page, need to get actual count
+            # First check if count is cached
+            cached_count = None
+            if use_cache:
+                cached_count = _get_from_cache(count_namespace, count_cache_key)
 
-        return results
+            if cached_count:
+                total_count = cached_count[0]["count"]
+                logger.info(f"Cache hit for count: {total_count}")
+            else:
+                # Execute COUNT query
+                count_query = f"SELECT COUNT(*) as cnt FROM ({base_query}) AS subquery"
+                logger.info("Executing count query for pagination")
+
+                count_result = run_with_timeout(
+                    lambda: spark.sql(count_query).collect(),
+                    timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+                    operation_name="query_count",
+                )
+                total_count = count_result[0]["cnt"]
+                logger.info(f"Total count: {total_count}")
+
+                # Cache the count separately for reuse across pages
+                if use_cache:
+                    _store_in_cache(
+                        count_namespace, count_cache_key, [{"count": total_count}]
+                    )
+
+            has_more = (offset + len(results)) < total_count
+
+        pagination = PaginationInfo(
+            limit=limit,
+            offset=offset,
+            total_count=total_count,
+            has_more=has_more,
+        )
+
+        response = TableQueryResponse(result=results, pagination=pagination)
+
+        if use_cache:
+            # Store serializable version in cache
+            cache_data = [
+                {
+                    "result": results,
+                    "pagination": pagination.model_dump(),
+                }
+            ]
+            _store_in_cache(namespace, cache_key, cache_data)
+
+        return response
+
     except SparkTimeoutError:
         raise  # Re-raise timeout errors as-is
+    except SparkQueryError:
+        raise  # Re-raise query validation errors as-is
     except Exception as e:
         logger.error(f"Error executing query: {e}")
         raise SparkOperationError(f"Failed to execute query: {str(e)}")
