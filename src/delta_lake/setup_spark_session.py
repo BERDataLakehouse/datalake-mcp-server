@@ -528,41 +528,13 @@ def get_spark_session(
         # from any existing JVM (e.g., spark.master from a previous session).
         spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
 
-        # RECOMMENDATION 1: Use .create() instead of .getOrCreate() for multi-user mode
-        # .getOrCreate() returns existing session even if configs differ (credential leak!)
-        # .create() forces new session but fails if one already exists
+        spark = builder.config(conf=spark_conf).getOrCreate()
+
+        # Log credentials to verify correct user (only for force_new_session)
         if force_new_session:
-            try:
-                logger.info("Creating new Spark session (force_new_session=True)")
-                spark = builder.config(conf=spark_conf).create()
-
-                # Safe access to app name (sparkContext not available in Spark Connect)
-                try:
-                    app_name = spark.sparkContext.appName
-                except Exception:
-                    app_name = config.get("spark.app.name", "unknown")
-
-                logger.info(
-                    f"New Spark session created: app={app_name}, "
-                    f"user={config.get('spark.hadoop.fs.s3a.access.key', 'N/A')[:10]}..."
-                )
-            except Exception as e:
-                # If .create() fails (session still exists), fall back to stop+create
-                logger.warning(
-                    f"Failed to create new session (.create() failed): {e}. "
-                    "Attempting to stop any lingering session and retry..."
-                )
-                active_session = SparkSession.getActiveSession()
-                if active_session:
-                    active_session.stop()
-                spark = builder.config(conf=spark_conf).create()
-                logger.info(
-                    "Successfully created session after stopping lingering session"
-                )
-        else:
-            # Use the same builder instance that we cleared
-            logger.debug("Using getOrCreate() for session (backwards compatibility)")
-            spark = builder.config(conf=spark_conf).getOrCreate()
+            logger.info(
+                f"Spark session created with user={config.get('spark.hadoop.fs.s3a.access.key', 'N/A')[:10]}..."
+            )
 
         logger.debug("Spark session creation complete, releasing lock")
 
