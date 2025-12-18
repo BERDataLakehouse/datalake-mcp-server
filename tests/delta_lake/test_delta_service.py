@@ -895,6 +895,58 @@ class TestQueryDeltaTable:
                         spark, "SELECT * FROM users", use_cache=False
                     )
 
+    def test_query_strips_existing_limit(self, mock_spark_session):
+        """Test that existing LIMIT clause is stripped and replaced by pagination params."""
+        spark = mock_spark_session()
+        test_data = [{"id": 1}]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache"):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    mock_timeout.side_effect = [test_data]
+                    result = delta_service.query_delta_table(
+                        spark,
+                        "SELECT * FROM users LIMIT 100",  # User has LIMIT 100
+                        limit=10,  # But pagination param is 10
+                        use_cache=False,
+                    )
+
+        # Pagination param (10) should override user's LIMIT (100)
+        assert result.pagination.limit == 10
+        # Verify the SQL call used the pagination limit, not the user's limit
+        sql_call = spark.sql.call_args[0][0]
+        assert "LIMIT 10" in sql_call
+
+    def test_query_strips_existing_limit_offset(self, mock_spark_session):
+        """Test that existing LIMIT and OFFSET clauses are stripped."""
+        spark = mock_spark_session()
+        test_data = [{"id": 1}]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache"):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    mock_timeout.side_effect = [test_data]
+                    result = delta_service.query_delta_table(
+                        spark,
+                        "SELECT * FROM users LIMIT 100 OFFSET 50",  # User has both
+                        limit=10,
+                        offset=5,  # Pagination params should override
+                        use_cache=False,
+                    )
+
+        # Pagination params should override user's LIMIT/OFFSET
+        assert result.pagination.limit == 10
+        assert result.pagination.offset == 5
+        # Verify the SQL call used pagination params
+        sql_call = spark.sql.call_args[0][0]
+        assert "LIMIT 10 OFFSET 5" in sql_call
+        assert "LIMIT 100" not in sql_call
+        assert "OFFSET 50" not in sql_call
+
 
 # =============================================================================
 # Tests for select_from_delta_table with Mocked Spark

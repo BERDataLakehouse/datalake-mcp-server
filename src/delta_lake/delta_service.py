@@ -359,8 +359,12 @@ def query_delta_table(
     Executes a SQL query against Delta tables with pagination support.
 
     The query is validated for safety, then wrapped to support pagination.
-    A count query is executed first to determine total rows, then the
-    paginated results are returned.
+    The data query is executed first, and a COUNT query is only executed if
+    the page is full (to determine if more pages exist). This optimization
+    skips the expensive COUNT when results are smaller than the limit.
+
+    Note: Any LIMIT/OFFSET clauses in the user's query are stripped and replaced
+    with the pagination parameters. The limit/offset parameters always take precedence.
 
     Args:
         spark: The SparkSession object.
@@ -387,14 +391,15 @@ def query_delta_table(
         )
 
     # Strip any existing LIMIT/OFFSET from user query since we'll add our own
-    # We use a subquery approach to handle pagination correctly
+    # Pagination parameters always override any LIMIT/OFFSET in the query
     base_query = query.rstrip().rstrip(";")
 
-    # Remove trailing LIMIT clause if present (we'll add our own)
-    existing_limit = _extract_limit_from_query(base_query)
-    if existing_limit is not None:
-        # Remove the LIMIT clause - simple regex replacement
-        base_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
+    # Remove trailing LIMIT and/or OFFSET clauses (we'll add our own)
+    # Handles: "LIMIT n", "LIMIT n OFFSET m", "OFFSET m" (rare but possible)
+    base_query = re.sub(
+        r"\s+LIMIT\s+\d+(\s+OFFSET\s+\d+)?\s*$", "", base_query, flags=re.IGNORECASE
+    )
+    base_query = re.sub(r"\s+OFFSET\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
 
     # Warn if using offset without ORDER BY - results will be non-deterministic
     if offset > 0:
