@@ -396,6 +396,18 @@ def query_delta_table(
         # Remove the LIMIT clause - simple regex replacement
         base_query = re.sub(r"\s+LIMIT\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
 
+    # Warn if using offset without ORDER BY - results will be non-deterministic
+    if offset > 0:
+        has_order_by = bool(
+            re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE)
+        )
+        if not has_order_by:
+            logger.warning(
+                f"Pagination with offset={offset} but query has no ORDER BY clause. "
+                "Results may be non-deterministic across pages. "
+                "Add ORDER BY to ensure consistent pagination."
+            )
+
     namespace = "query"
     params = {"query": base_query, "limit": limit, "offset": offset}
     cache_key = _generate_cache_key(params)

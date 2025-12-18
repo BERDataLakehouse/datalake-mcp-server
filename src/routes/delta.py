@@ -226,7 +226,10 @@ def sample_table(
     description=(
         "Executes a SQL query against Delta tables with pagination support. "
         "Returns query results along with pagination metadata including total count. "
-        "Use limit and offset parameters to paginate through large result sets."
+        "Use limit and offset parameters to paginate through large result sets. "
+        "IMPORTANT: Include an ORDER BY clause in your query for deterministic "
+        "pagination results. Without ORDER BY, rows may appear in different order "
+        "across pages, causing duplicates or missing records."
     ),
     operation_id="query_delta_table",
 )

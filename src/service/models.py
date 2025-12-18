@@ -138,7 +138,12 @@ class DatabaseStructureResponse(BaseModel):
 
 
 class TableQueryRequest(BaseModel):
-    """Request model for querying a Delta table."""
+    """Request model for querying a Delta table.
+
+    Note: For deterministic pagination with offset > 0, include an ORDER BY
+    clause in your query. Without ORDER BY, rows may appear in different
+    order across pages, causing duplicates or missing records.
+    """
 
     query: Annotated[str, Field(description="SQL query to execute against the table")]
     limit: Annotated[
@@ -151,7 +156,13 @@ class TableQueryRequest(BaseModel):
     ] = 1000
     offset: Annotated[
         int,
-        Field(description="Number of rows to skip for pagination", ge=0),
+        Field(
+            description=(
+                "Number of rows to skip for pagination. "
+                "Requires ORDER BY in query for deterministic results."
+            ),
+            ge=0,
+        ),
     ] = 0
 
 
