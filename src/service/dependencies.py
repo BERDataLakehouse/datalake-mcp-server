@@ -372,6 +372,7 @@ def get_spark_session(
         # This ensures proper cleanup and prevents session reuse across requests
         if spark is not None:
             try:
+                logger.info("Stopping Spark session (cleanup)")
                 # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
                 # This is a belt-and-suspenders approach alongside fs.s3a.impl.disable.cache
                 # In shared cluster mode, the S3A FileSystem caches credentials at JVM level
