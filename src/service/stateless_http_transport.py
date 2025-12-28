@@ -157,9 +157,23 @@ class StatelessHttpTransport:
                 headers=headers_dict,
             )
 
-        except Exception:
-            logger.exception("Error in stateless StreamableHTTPSessionManager")
-            raise HTTPException(status_code=500, detail="Internal server error")
+        except HTTPException as http_exc:
+            # Preserve existing HTTPExceptions but log with request context for debugging
+            logger.exception(
+                "HTTPException in stateless StreamableHTTPSessionManager for %s %s",
+                request.method,
+                request.url.path,
+            )
+            raise http_exc
+        except Exception as exc:
+            # Log unexpected errors with request context and propagate as 500 while
+            # preserving the original exception as the cause for debugging.
+            logger.exception(
+                "Unexpected error in stateless StreamableHTTPSessionManager for %s %s",
+                request.method,
+                request.url.path,
+            )
+            raise HTTPException(status_code=500, detail="Internal server error") from exc
 
     async def shutdown(self) -> None:
         """Clean up the session manager and background task."""
