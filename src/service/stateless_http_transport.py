@@ -186,13 +186,15 @@ class StatelessHttpTransport:
     async def shutdown(self) -> None:
         """Clean up the session manager and background task."""
         if self._manager_task and not self._manager_task.done():
+        # Mark the manager as not started before beginning shutdown to avoid
+        # a race where new requests see a started state while teardown is in progress.
+        self._manager_started = False
+        if self._manager_task and not self._manager_task.done():
             self._manager_task.cancel()
             try:
                 await self._manager_task
             except asyncio.CancelledError:
-                # Expected during shutdown when cancelling the manager task.
-                logger.debug("Stateless HTTP manager task cancelled during shutdown")
-        self._manager_started = False
+                pass
 
 
 def mount_stateless_mcp(
