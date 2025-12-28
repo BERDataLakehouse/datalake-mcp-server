@@ -71,7 +71,7 @@ print(f"Your token: {token}")
 Use the `claude mcp add` command to register the BERDL Datalake MCP server:
 
 ```bash
-claude mcp add --transport sse --scope user berdl-datalake \
+claude mcp add --transport http --scope user berdl-datalake \
   https://hub.berdl.kbase.us/apis/mcp/mcp \
   --header "Authorization: Bearer YOUR_KBASE_AUTH_TOKEN"
 ```
@@ -79,7 +79,7 @@ claude mcp add --transport sse --scope user berdl-datalake \
 Replace `YOUR_KBASE_AUTH_TOKEN` with your actual token from Step 1.
 
 **Command breakdown:**
-- `--transport sse` - Use Server-Sent Events transport protocol
+- `--transport http` - Use Streamable HTTP transport protocol (enables horizontal scaling)
 - `--scope user` - Register for current user only
 - `berdl-datalake` - Name for this MCP server connection
 - `https://hub.berdl.kbase.us/apis/mcp/mcp` - BERDL MCP server endpoint
@@ -98,7 +98,7 @@ You should see output similar to:
 ```
 Checking MCP server health...
 
-berdl-datalake: https://hub.berdl.kbase.us/apis/mcp/mcp (SSE) - ✓ Connected
+berdl-datalake: https://hub.berdl.kbase.us/apis/mcp/mcp (HTTP) - ✓ Connected
 ```
 
 ### Step 4: Verify Configuration File
@@ -109,7 +109,7 @@ Your MCP server configuration is stored in `~/.claude.json`. You can verify it c
 {
   "mcpServers": {
     "berdl-datalake": {
-      "type": "sse",
+      "type": "http",
       "url": "https://hub.berdl.kbase.us/apis/mcp/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_KBASE_AUTH_TOKEN"
@@ -233,7 +233,7 @@ claude mcp list
 
 # If disconnected, try re-adding
 claude mcp remove berdl-datalake
-claude mcp add --transport sse --scope user berdl-datalake \
+claude mcp add --transport http --scope user berdl-datalake \
   https://hub.berdl.kbase.us/apis/mcp/mcp \
   --header "Authorization: Bearer YOUR_TOKEN"
 ```
@@ -291,7 +291,7 @@ If Claude Code doesn't recognize BERDL data lake queries:
 claude mcp list
 
 # Should show:
-# berdl-datalake: https://hub.berdl.kbase.us/apis/mcp/mcp (SSE) - ✓ Connected
+# berdl-datalake: https://hub.berdl.kbase.us/apis/mcp/mcp (HTTP) - ✓ Connected
 ```
 
 ## Updating Your Token
@@ -308,7 +308,7 @@ nano ~/.claude.json
 {
   "mcpServers": {
     "berdl-datalake": {
-      "type": "sse",
+      "type": "http",
       "url": "https://hub.berdl.kbase.us/apis/mcp/mcp",
       "headers": {
         "Authorization": "Bearer NEW_TOKEN_HERE"

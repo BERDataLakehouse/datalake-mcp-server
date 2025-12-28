@@ -181,11 +181,12 @@ class StatelessHttpTransport:
                 request.method,
                 request.url.path,
             )
-            raise HTTPException(status_code=500, detail="Internal server error") from exc
+            raise HTTPException(
+                status_code=500, detail="Internal server error"
+            ) from exc
 
     async def shutdown(self) -> None:
         """Clean up the session manager and background task."""
-        if self._manager_task and not self._manager_task.done():
         # Mark the manager as not started before beginning shutdown to avoid
         # a race where new requests see a started state while teardown is in progress.
         self._manager_started = False
