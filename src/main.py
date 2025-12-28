@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from src.routes import delta, health
 from src.service import app_state
 from src.service.config import configure_logging, get_settings
+from src.service.stateless_http_transport import mount_stateless_mcp
 from src.service.exception_handlers import universal_error_handler
 from src.service.exceptions import InvalidAuthHeaderError
 from src.service.models import ErrorResponse
@@ -79,16 +80,20 @@ def create_application() -> FastAPI:
     app.include_router(health.router)
     app.include_router(delta.router)
 
-    # MCP Server Integration
-    logger.info("Setting up MCP server...")
+    # MCP Server Integration with STATELESS HTTP transport for horizontal scaling
+    # This enables true horizontal pod scaling in Kubernetes without sticky sessions
+    logger.info("Setting up MCP server with stateless HTTP transport...")
     mcp = FastApiMCP(
         app,
         name="DeltaLakeMCP",
         description="MCP Server for interacting with Delta Lake tables via Spark",
         include_tags=["Delta Lake"],  # Only include endpoints tagged with "Delta Lake"
     )
-    mcp.mount()
-    logger.info("MCP server mounted")
+    # Use stateless HTTP transport instead of default SSE for horizontal scaling
+    mcp_transport = mount_stateless_mcp(mcp)
+    logger.info(
+        "MCP server mounted with stateless HTTP transport (horizontal scaling enabled)"
+    )
 
     # Define startup and shutdown event handlers
     async def startup_event():
@@ -98,6 +103,7 @@ def create_application() -> FastAPI:
 
     async def shutdown_event():
         logger.info("Shutting down application")
+        await mcp_transport.shutdown()
         await app_state.destroy_app_state(app)
         logger.info("Application shut down")
 

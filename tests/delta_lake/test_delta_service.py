@@ -675,6 +675,52 @@ class TestCountDeltaTable:
                             spark, "testdb", "table", use_cache=False
                         )
 
+    def test_count_with_username_uses_user_scoped_cache(self, mock_spark_session):
+        """Test that count with username uses user-scoped cache key."""
+        spark = mock_spark_session()
+        spark.table.return_value.count.return_value = 100
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ) as mock_cache_get:
+                with patch(
+                    "src.delta_lake.delta_service._store_in_cache"
+                ) as mock_cache_set:
+                    with patch(
+                        "src.delta_lake.delta_service.run_with_timeout",
+                        side_effect=lambda func, **kwargs: func(),
+                    ):
+                        delta_service.count_delta_table(
+                            spark, "testdb", "testtable", username="alice"
+                        )
+
+            # Verify cache was checked/stored with user-scoped key
+            assert mock_cache_get.called
+            assert mock_cache_set.called
+
+            # Get the cache key used - it should include the username
+            cache_key_alice = mock_cache_get.call_args[0][1]
+
+        # Now test with a different user
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ) as mock_cache_get2:
+                with patch("src.delta_lake.delta_service._store_in_cache"):
+                    with patch(
+                        "src.delta_lake.delta_service.run_with_timeout",
+                        side_effect=lambda func, **kwargs: func(),
+                    ):
+                        delta_service.count_delta_table(
+                            spark, "testdb", "testtable", username="bob"
+                        )
+
+            cache_key_bob = mock_cache_get2.call_args[0][1]
+
+        # Different users should have different cache keys
+        assert cache_key_alice != cache_key_bob
+
 
 # =============================================================================
 # Tests for sample_delta_table with Mocked Spark
@@ -1082,6 +1128,56 @@ class TestCacheKeyGeneration:
         key2 = delta_service._generate_cache_key(params2)
 
         assert key1 == key2
+
+    def test_generate_cache_key_with_username_isolation(self):
+        """Test that different users get different cache keys for same query.
+
+        This ensures cache isolation between users to prevent authorization bypass
+        where one user's cached results could be returned to another user who may
+        not have permission to access the underlying data.
+        """
+        params = {"database": "testdb", "table": "users"}
+
+        key_user1 = delta_service._generate_cache_key(params, username="alice")
+        key_user2 = delta_service._generate_cache_key(params, username="bob")
+
+        assert key_user1 != key_user2
+
+    def test_generate_cache_key_same_user_same_key(self):
+        """Test that same user gets same cache key for same query."""
+        params = {"database": "testdb", "table": "users"}
+
+        key1 = delta_service._generate_cache_key(params, username="alice")
+        key2 = delta_service._generate_cache_key(params, username="alice")
+
+        assert key1 == key2
+
+    def test_generate_cache_key_without_username_backward_compatible(self):
+        """Test that cache key without username is backward compatible.
+
+        When username is None, the key should be the same as before the
+        user isolation feature was added.
+        """
+        params = {"database": "testdb", "table": "users"}
+
+        key_no_user = delta_service._generate_cache_key(params, username=None)
+        key_empty_user = delta_service._generate_cache_key(params)
+
+        # Both should produce the same key (backward compatible)
+        assert key_no_user == key_empty_user
+
+    def test_generate_cache_key_with_username_differs_from_no_username(self):
+        """Test that providing a username changes the cache key.
+
+        Cache entries with a username should not collide with entries
+        without a username (anonymous/legacy entries).
+        """
+        params = {"database": "testdb", "table": "users"}
+
+        key_with_user = delta_service._generate_cache_key(params, username="alice")
+        key_without_user = delta_service._generate_cache_key(params, username=None)
+
+        assert key_with_user != key_without_user
 
 
 # =============================================================================

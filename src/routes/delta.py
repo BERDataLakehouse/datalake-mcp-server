@@ -184,9 +184,11 @@ def count_table(
     """
     Endpoint to count rows in a specific Delta table.
     """
+    # Pass username to service layer for user-scoped cache isolation
+    username = auth.user if auth else None
 
     count = delta_service.count_delta_table(
-        spark=spark, database=request.database, table=request.table
+        spark=spark, database=request.database, table=request.table, username=username
     )
     return TableCountResponse(count=count)
 
@@ -207,6 +209,9 @@ def sample_table(
     """
     Endpoint to get a sample of data from a specific Delta table.
     """
+    # Pass username to service layer for user-scoped cache isolation
+    username = auth.user if auth else None
+
     sample: List[Dict[str, Any]] = delta_service.sample_delta_table(
         spark=spark,
         database=request.database,
@@ -214,6 +219,7 @@ def sample_table(
         limit=request.limit,
         columns=request.columns,
         where_clause=request.where_clause,
+        username=username,
     )
     return TableSampleResponse(sample=sample)
 
@@ -241,11 +247,15 @@ def query_table(
     """
     Endpoint to execute a query against Delta tables with pagination support.
     """
+    # Pass username to service layer for user-scoped cache isolation
+    username = auth.user if auth else None
+
     return delta_service.query_delta_table(
         spark=spark,
         query=request.query,
         limit=request.limit,
         offset=request.offset,
+        username=username,
     )
 
 
@@ -274,4 +284,9 @@ def select_table(
     The backend constructs the query from the provided parameters, ensuring
     security and proper escaping of all values.
     """
-    return delta_service.select_from_delta_table(spark=spark, request=request)
+    # Pass username to service layer for user-scoped cache isolation
+    username = auth.user if auth else None
+
+    return delta_service.select_from_delta_table(
+        spark=spark, request=request, username=username
+    )
