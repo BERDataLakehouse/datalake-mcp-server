@@ -43,10 +43,18 @@ class StatelessHttpTransport:
 
         Args:
             mcp_server: The MCP server instance to handle requests
-            event_store: Optional event store for resumability (typically not needed for stateless)
+            event_store: Optional event store for advanced resumability or observability use
+                cases. In most stateless deployments this can be omitted; if provided, it
+                will be passed through to the underlying StreamableHTTPSessionManager.
             json_response: Whether to use JSON responses (default True for HTTP)
         """
         self.mcp_server = mcp_server
+        if event_store is not None:
+            logger.warning(
+                "An 'event_store' was provided to StatelessHttpTransport. "
+                "Stateless mode typically does not require an event store; "
+                "ensure this configuration is intentional for your use case."
+            )
         self.event_store = event_store
         self.json_response = json_response
         self._session_manager: StreamableHTTPSessionManager | None = None
