@@ -190,7 +190,8 @@ class StatelessHttpTransport:
             try:
                 await self._manager_task
             except asyncio.CancelledError:
-                pass
+                # Expected during shutdown when cancelling the manager task.
+                logger.debug("Stateless HTTP manager task cancelled during shutdown")
         self._manager_started = False
 
 
