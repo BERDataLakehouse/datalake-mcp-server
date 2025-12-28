@@ -189,10 +189,24 @@ def _check_exists(database: str, table: str) -> bool:
     return True
 
 
-def _generate_cache_key(params: Dict[str, Any]) -> str:
+def _generate_cache_key(params: Dict[str, Any], username: str | None = None) -> str:
     """
     Generate a cache key from parameters.
+
+    Args:
+        params: Query parameters to include in the cache key.
+        username: Username to include in the cache key for user isolation.
+            If provided, ensures cache entries are scoped per-user to prevent
+            authorization bypass where one user's cached results could be
+            returned to another user who may not have permission to access
+            the underlying data.
+
+    Returns:
+        MD5 hash of the parameters for use as a cache key.
     """
+    # Include username in params if provided for user-scoped cache isolation
+    if username:
+        params = {"_username": username, **params}
     # Convert parameters to a sorted JSON string to ensure consistency
     param_str = json.dumps(params, sort_keys=True)
     # Create a hash of the parameters to avoid very long keys
@@ -220,7 +234,11 @@ def _store_in_cache(
 
 
 def count_delta_table(
-    spark: SparkSession, database: str, table: str, use_cache: bool = True
+    spark: SparkSession,
+    database: str,
+    table: str,
+    use_cache: bool = True,
+    username: str | None = None,
 ) -> int:
     """
     Counts the number of rows in a specific Delta table.
@@ -230,6 +248,8 @@ def count_delta_table(
         database: The database (namespace) containing the table.
         table: The name of the Delta table.
         use_cache: Whether to use the redis cache to store the result.
+        username: Username for cache key isolation. When provided, cache entries
+            are scoped per-user to prevent authorization bypass.
 
     Returns:
         The number of rows in the table.
@@ -237,7 +257,7 @@ def count_delta_table(
 
     namespace = "count"
     params = {"database": database, "table": table}
-    cache_key = _generate_cache_key(params)
+    cache_key = _generate_cache_key(params, username=username)
 
     if use_cache:
         cached_result = _get_from_cache(namespace, cache_key)
@@ -278,6 +298,7 @@ def sample_delta_table(
     columns: List[str] | None = None,
     where_clause: str | None = None,
     use_cache: bool = True,
+    username: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Retrieves a sample of rows from a specific Delta table.
@@ -290,6 +311,8 @@ def sample_delta_table(
         columns: The columns to return. If None, all columns will be returned.
         where_clause: A SQL WHERE clause to filter the rows. e.g. "id > 100"
         use_cache: Whether to use the redis cache to store the result.
+        username: Username for cache key isolation. When provided, cache entries
+            are scoped per-user to prevent authorization bypass.
 
     Returns:
         A list of dictionaries, where each dictionary represents a row.
@@ -302,7 +325,7 @@ def sample_delta_table(
         "columns": sorted(columns) if columns else None,
         "where_clause": where_clause,
     }
-    cache_key = _generate_cache_key(params)
+    cache_key = _generate_cache_key(params, username=username)
 
     if use_cache:
         cached_result = _get_from_cache(namespace, cache_key)
@@ -354,6 +377,7 @@ def query_delta_table(
     limit: int = 1000,
     offset: int = 0,
     use_cache: bool = True,
+    username: str | None = None,
 ) -> TableQueryResponse:
     """
     Executes a SQL query against Delta tables with pagination support.
@@ -372,6 +396,8 @@ def query_delta_table(
         limit: Maximum number of rows to return (default: 1000, max: 50000).
         offset: Number of rows to skip for pagination (default: 0).
         use_cache: Whether to use the redis cache to store the result.
+        username: Username for cache key isolation. When provided, cache entries
+            are scoped per-user to prevent authorization bypass.
 
     Returns:
         TableQueryResponse with result data and pagination info.
@@ -415,11 +441,11 @@ def query_delta_table(
 
     namespace = "query"
     params = {"query": base_query, "limit": limit, "offset": offset}
-    cache_key = _generate_cache_key(params)
+    cache_key = _generate_cache_key(params, username=username)
 
     # Separate cache key for count (independent of limit/offset for reuse across pages)
     count_namespace = "query_count"
-    count_cache_key = _generate_cache_key({"query": base_query})
+    count_cache_key = _generate_cache_key({"query": base_query}, username=username)
 
     if use_cache:
         cached_result = _get_from_cache(namespace, cache_key)
@@ -811,7 +837,10 @@ def build_select_query(
 
 
 def select_from_delta_table(
-    spark: SparkSession, request: TableSelectRequest, use_cache: bool = True
+    spark: SparkSession,
+    request: TableSelectRequest,
+    use_cache: bool = True,
+    username: str | None = None,
 ) -> TableSelectResponse:
     """
     Execute a structured SELECT query against Delta tables with pagination.
@@ -820,6 +849,8 @@ def select_from_delta_table(
         spark: The SparkSession object.
         request: The structured select request.
         use_cache: Whether to use the redis cache to store the result.
+        username: Username for cache key isolation. When provided, cache entries
+            are scoped per-user to prevent authorization bypass.
 
     Returns:
         TableSelectResponse with data and pagination info.
@@ -828,7 +859,7 @@ def select_from_delta_table(
 
     # Generate cache key from request parameters
     params = request.model_dump()
-    cache_key = _generate_cache_key(params)
+    cache_key = _generate_cache_key(params, username=username)
 
     if use_cache:
         cached_result = _get_from_cache(namespace, cache_key)
