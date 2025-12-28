@@ -224,9 +224,13 @@ def mount_stateless_mcp(
         await transport.shutdown()
     """
     # Normalize mount path
-    if not mount_path.startswith("/"):
+    # Treat empty mount path as root ("/") to avoid inconsistent normalization.
+    if not mount_path:
+        mount_path = "/"
+    elif not mount_path.startswith("/"):
         mount_path = f"/{mount_path}"
-    if mount_path.endswith("/"):
+    # Avoid stripping the only slash from "/" so we never end up with an empty path.
+    if mount_path != "/" and mount_path.endswith("/"):
         mount_path = mount_path[:-1]
 
     if router is None:
