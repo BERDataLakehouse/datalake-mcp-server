@@ -70,7 +70,7 @@ class StatelessHttpTransport:
 
             logger.debug("Starting stateless StreamableHTTP session manager")
 
-            # Create the session manager with STATELESS=TRUE for horizontal scaling
+            # Create the session manager with stateless=True for horizontal scaling
             # This is the key difference from fastapi-mcp's default implementation
             self._session_manager = StreamableHTTPSessionManager(
                 app=self.mcp_server,
