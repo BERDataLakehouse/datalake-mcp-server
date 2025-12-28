@@ -53,7 +53,11 @@ class StatelessHttpTransport:
             logger.warning(
                 "An 'event_store' was provided to StatelessHttpTransport. "
                 "Stateless mode typically does not require an event store; "
-                "ensure this configuration is intentional for your use case."
+                "consider this only for advanced use cases such as cross-pod "
+                "streaming resumability, persistent audit/observability, or "
+                "custom replay behavior. Ensure this configuration is "
+                "intentional for your deployment, and refer to the MCP "
+                "server EventStore documentation for guidance."
             )
         self.event_store = event_store
         self.json_response = json_response
