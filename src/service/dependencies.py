@@ -323,12 +323,12 @@ def get_spark_session(
                 **base_user_settings,
             )
 
+            using_spark_connect = True
             spark = _get_spark_session(
                 app_name=f"datalake_mcp_server_{username}",
                 settings=user_settings,
                 use_spark_connect=True,
             )
-            using_spark_connect = True  # Mark as Spark Connect mode
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
         else:
