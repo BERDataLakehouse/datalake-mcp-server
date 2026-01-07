@@ -485,7 +485,11 @@ class TestGetSparkSession:
     """Tests for the get_spark_session dependency generator."""
 
     def test_spark_connect_success(self, mock_request, mock_settings):
-        """Test successful Spark Connect session creation."""
+        """Test successful Spark Connect session creation.
+
+        For Spark Connect mode, we do NOT call spark.stop() because the Spark
+        cluster belongs to the user's notebook pod, not to the MCP server.
+        """
         mock_request_obj = mock_request(user="testuser")
 
         with patch(
@@ -520,7 +524,9 @@ class TestGetSparkSession:
                             except StopIteration:
                                 pass
 
-                            mock_spark.stop.assert_called_once()
+                            # Spark Connect mode: stop() should NOT be called
+                            # (cluster belongs to user's notebook, not us)
+                            mock_spark.stop.assert_not_called()
 
     def test_spark_connect_fallback_to_cluster(self, mock_request, mock_settings):
         """Test fallback to shared cluster when Spark Connect unavailable."""
@@ -590,7 +596,11 @@ class TestGetSparkSession:
                 next(gen)
 
     def test_session_stopped_even_on_error(self, mock_request, mock_settings):
-        """Test that session is stopped even if request handler raises error."""
+        """Test that session is stopped even if request handler raises error.
+
+        This test uses shared cluster mode (is_spark_connect_reachable=False)
+        to verify cleanup behavior, since Spark Connect mode skips stop().
+        """
         mock_request_obj = mock_request(user="testuser")
 
         with patch(
@@ -606,7 +616,7 @@ class TestGetSparkSession:
                 ):
                     with patch(
                         "src.service.dependencies.is_spark_connect_reachable",
-                        return_value=True,
+                        return_value=False,  # Use shared cluster mode to test cleanup
                     ):
                         with patch(
                             "src.service.dependencies._get_spark_session"
@@ -623,11 +633,15 @@ class TestGetSparkSession:
                             except ValueError:
                                 pass
 
-                            # Session should still be stopped
+                            # Session should still be stopped (shared cluster mode)
                             mock_spark.stop.assert_called_once()
 
     def test_session_stop_error_handled_gracefully(self, mock_request, mock_settings):
-        """Test that errors during session.stop() are handled."""
+        """Test that errors during session.stop() are handled.
+
+        This test uses shared cluster mode (is_spark_connect_reachable=False)
+        since that's when stop() is actually called.
+        """
         mock_request_obj = mock_request(user="testuser")
 
         with patch(
@@ -639,7 +653,7 @@ class TestGetSparkSession:
             ):
                 with patch(
                     "src.service.dependencies.is_spark_connect_reachable",
-                    return_value=True,
+                    return_value=False,  # Use shared cluster mode to test stop() error handling
                 ):
                     with patch(
                         "src.service.dependencies._get_spark_session"
