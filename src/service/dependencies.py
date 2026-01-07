@@ -264,6 +264,7 @@ def get_spark_session(
         Exception: If user is not authenticated or both connection methods fail
     """
     spark = None
+    using_spark_connect = False  # Track connection mode for cleanup decision
     try:
         # Get authenticated user from request
         username = get_user_from_request(request)
@@ -327,6 +328,7 @@ def get_spark_session(
                 settings=user_settings,
                 use_spark_connect=True,
             )
+            using_spark_connect = True  # Mark as Spark Connect mode
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
         else:
@@ -359,6 +361,7 @@ def get_spark_session(
                 settings=fallback_settings,
                 use_spark_connect=False,
             )
+            # using_spark_connect remains False for shared cluster
 
             logger.info(
                 f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url} "
@@ -369,10 +372,15 @@ def get_spark_session(
         yield spark
 
     finally:
-        # This ensures proper cleanup and prevents session reuse across requests
-        if spark is not None:
+        # Cleanup logic depends on connection mode:
+        # - Spark Connect: Don't stop the session. The Spark cluster belongs to the user's
+        #   notebook pod, not to us. Calling spark.stop() causes race conditions with
+        #   Spark Connect's internal thread pool cleanup (_release_thread_pool).
+        # - Shared Cluster: Must stop the session to release cluster resources and prevent
+        #   credential leakage between users.
+        if spark is not None and not using_spark_connect:
             try:
-                logger.info("Stopping Spark session (cleanup)")
+                logger.info("Stopping Spark session (shared cluster cleanup)")
                 # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
                 # This is a belt-and-suspenders approach alongside fs.s3a.impl.disable.cache
                 # In shared cluster mode, the S3A FileSystem caches credentials at JVM level
@@ -387,3 +395,7 @@ def get_spark_session(
                 logger.info("Spark session stopped successfully")
             except Exception as e:
                 logger.error(f"Error stopping Spark session: {e}", exc_info=True)
+        elif spark is not None:
+            logger.debug(
+                "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
+            )
