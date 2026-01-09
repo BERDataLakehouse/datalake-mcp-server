@@ -328,25 +328,33 @@ def get_spark_session(
     # Quick TCP check to see if Spark Connect port is reachable
     if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
         # =======================================================================
-        # SPARK CONNECT MODE (no locking needed - user has dedicated cluster)
+        # SPARK CONNECT MODE
+        # Must acquire lock to prevent creating Connect session while Standalone
+        # session is active (JVM can only have one session type at a time).
+        # Lock is only held during session CREATION, not the entire request.
         # =======================================================================
         logger.info(
-            f"Spark Connect port reachable, attempting connection: {spark_connect_url}"
-        )
-        user_settings = BERDLSettings(
-            SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-            **base_user_settings,
+            f"Spark Connect port reachable, acquiring session lock for Connect mode..."
         )
 
-        spark = _get_spark_session(
-            app_name=f"datalake_mcp_server_{username}",
-            settings=user_settings,
-            use_spark_connect=True,
-        )
+        with _standalone_request_lock:
+            logger.info("Session lock acquired for Connect mode")
+            user_settings = BERDLSettings(
+                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                **base_user_settings,
+            )
 
-        logger.info(f"✅ Connected via Spark Connect for user {username}")
+            spark = _get_spark_session(
+                app_name=f"datalake_mcp_server_{username}",
+                settings=user_settings,
+                use_spark_connect=True,
+            )
+            logger.info(f"✅ Connected via Spark Connect for user {username}")
 
-        # Yield session - no cleanup needed for Connect mode
+        logger.info("Session lock released for Connect mode")
+
+        # Yield session OUTSIDE the lock - Connect sessions can run concurrently
+        # once created (they use the user's dedicated cluster)
         yield spark
 
         # No cleanup: Connect sessions belong to user's notebook pod
