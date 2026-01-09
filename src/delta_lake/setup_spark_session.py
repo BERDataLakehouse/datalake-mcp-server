@@ -499,9 +499,10 @@ def get_spark_session(
 
         # ==========================================================================
         # NOTE: Mode conflict resolution is handled at the request level in
-        # dependencies.py via _standalone_request_lock. Standalone requests hold
-        # the lock for their entire lifecycle, ensuring mode switches only happen
-        # when no standalone request is in progress.
+        # dependencies.py via _session_mode_lock. This lock serializes ALL session
+        # creation (both Connect and Standalone) to prevent the JVM from having
+        # conflicting session types. Standalone requests hold the mode lock for
+        # their entire lifecycle, ensuring mode switches only happen after cleanup.
         # ==========================================================================
 
         # Clear builder's cached options to prevent conflicts
