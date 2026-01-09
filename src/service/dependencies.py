@@ -334,7 +334,7 @@ def get_spark_session(
         # Lock is only held during session CREATION, not the entire request.
         # =======================================================================
         logger.info(
-            f"Spark Connect port reachable, acquiring session lock for Connect mode..."
+            "Spark Connect port reachable, acquiring session lock for Connect mode..."
         )
 
         with _standalone_request_lock:
