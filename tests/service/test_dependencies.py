@@ -730,6 +730,219 @@ class TestConcurrentSparkSessions:
         # Each user should get their own session
         assert sorted(results) == [0, 1, 2, 3, 4]
 
+    def test_connect_mode_acquires_lock_during_creation(
+        self, mock_request, mock_settings
+    ):
+        """Test that Connect mode acquires _session_mode_lock during session creation.
+
+        Verifies the lock is acquired by checking that concurrent Connect creations
+        don't overlap (they should be serialized).
+        """
+        import threading
+        import time
+
+        mock_request_obj = mock_request(user="testuser")
+        creation_events = {"count": 0, "max_concurrent": 0, "current": 0}
+        lock = threading.Lock()
+
+        with patch(
+            "src.service.dependencies.get_user_from_request", return_value="testuser"
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    return_value=True,
+                ):
+                    with patch(
+                        "src.service.dependencies._get_spark_session"
+                    ) as mock_get_spark:
+                        # Track concurrent creations
+                        def mock_create(*args, **kwargs):
+                            with lock:
+                                creation_events["current"] += 1
+                                creation_events["max_concurrent"] = max(
+                                    creation_events["max_concurrent"],
+                                    creation_events["current"],
+                                )
+                                creation_events["count"] += 1
+                            time.sleep(0.01)  # Small delay to expose races
+                            with lock:
+                                creation_events["current"] -= 1
+                            return MagicMock()
+
+                        mock_get_spark.side_effect = mock_create
+
+                        gen = get_spark_session(mock_request_obj, mock_settings)
+                        next(gen)
+
+                        # Should have created exactly 1 session
+                        assert creation_events["count"] == 1
+
+                        # Cleanup
+                        try:
+                            next(gen)
+                        except StopIteration:
+                            pass
+
+    def test_standalone_mode_holds_lock_for_entire_request(
+        self, mock_request, mock_settings
+    ):
+        """Test that standalone mode holds _session_mode_lock for entire request lifecycle.
+
+        Verifies the lock prevents other requests from starting while one is active.
+        """
+        import threading
+
+        mock_request_obj = mock_request(user="testuser")
+        lifecycle_events = []
+        events_lock = threading.Lock()
+
+        with patch(
+            "src.service.dependencies.get_user_from_request", return_value="testuser"
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    return_value=False,  # Fallback to standalone
+                ):
+                    with patch(
+                        "src.service.dependencies._get_spark_session"
+                    ) as mock_get_spark:
+
+                        def mock_create(*args, **kwargs):
+                            with events_lock:
+                                lifecycle_events.append("session_created")
+                            mock_spark = MagicMock()
+                            return mock_spark
+
+                        mock_get_spark.side_effect = mock_create
+
+                        gen = get_spark_session(mock_request_obj, mock_settings)
+                        _spark = next(gen)
+
+                        with events_lock:
+                            lifecycle_events.append("after_yield")
+
+                        # Session should have been created before yield
+                        assert "session_created" in lifecycle_events
+                        assert "after_yield" in lifecycle_events
+
+                        # Cleanup
+                        try:
+                            next(gen)
+                        except StopIteration:
+                            pass
+
+    def test_mixed_mode_requests_serialize_during_creation(
+        self, mock_request, mock_settings, concurrent_executor
+    ):
+        """Test that mixed Connect/Standalone requests serialize session creation.
+
+        When both Connect and Standalone requests happen concurrently,
+        session creation should be serialized to prevent mode conflicts.
+
+        Note: Patches are applied OUTSIDE the threads to avoid race conditions
+        where each thread's patch context interferes with others.
+        """
+        import threading
+        import time
+
+        creation_tracking = {"in_use": False, "conflicts": 0, "created": 0}
+        tracking_lock = threading.Lock()
+
+        # Track which user index requested which mode
+        mode_by_user = {}
+        mode_lock = threading.Lock()
+
+        def mock_create(*args, **kwargs):
+            """Track if another creation is in progress."""
+            with tracking_lock:
+                if creation_tracking["in_use"]:
+                    creation_tracking["conflicts"] += 1
+                creation_tracking["in_use"] = True
+                creation_tracking["created"] += 1
+
+            time.sleep(0.02)  # Small delay to expose race conditions
+
+            with tracking_lock:
+                creation_tracking["in_use"] = False
+            return MagicMock()
+
+        def get_user_mock(request):
+            """Return user_{0-3} based on request object."""
+            return getattr(request, "_test_user", "testuser")
+
+        def is_connect_mock(url, timeout=1.0):
+            """Return True for even users (Connect), False for odd (Standalone)."""
+            # Extract user index from URL pattern
+            # URL format: sc://jupyter-user_{N}:15002
+            with mode_lock:
+                for user, is_connect in mode_by_user.items():
+                    if user in url:
+                        return is_connect
+            return False
+
+        def create_session(mode_index):
+            """Create session using shared mocks."""
+            is_connect = mode_index % 2 == 0
+            mock_req = MagicMock()
+            mock_req.state._request_state = MagicMock()
+            mock_req._test_user = f"user_{mode_index}"
+
+            with mode_lock:
+                mode_by_user[f"user_{mode_index}"] = is_connect
+
+            gen = get_spark_session(mock_req, mock_settings)
+            _spark = next(gen)
+
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+            return mode_index
+
+        # Apply patches OUTSIDE the threads so all threads share the same mocks
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            side_effect=get_user_mock,
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    side_effect=is_connect_mock,
+                ):
+                    with patch(
+                        "src.service.dependencies._get_spark_session",
+                        side_effect=mock_create,
+                    ):
+                        # Run 4 requests: 2 Connect, 2 Standalone (interleaved)
+                        args_list = [(i,) for i in range(4)]
+                        results, exceptions = concurrent_executor(
+                            create_session, args_list, max_workers=4
+                        )
+
+        # No exceptions should occur
+        assert len(exceptions) == 0, f"Got exceptions: {exceptions}"
+        # All requests should complete
+        assert sorted(results) == [0, 1, 2, 3]
+        # All sessions should have been created
+        assert creation_tracking["created"] == 4
+        # No conflicts should occur (lock should serialize creation)
+        assert creation_tracking["conflicts"] == 0, (
+            f"Expected 0 conflicts but got {creation_tracking['conflicts']}. "
+            "This indicates the lock is not properly serializing session creation."
+        )
+
 
 # =============================================================================
 # Constants Tests

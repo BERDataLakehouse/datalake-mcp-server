@@ -64,13 +64,14 @@ DEFAULT_SPARK_POOL = "default"
 SPARK_CONNECT_PORT = "15002"
 
 # =============================================================================
-# MODE ISOLATION LOCK
+# SESSION MODE LOCK
 # =============================================================================
-# Standalone (shared cluster) requests must be serialized to prevent mode conflicts
-# with Spark Connect requests. The JVM can only have one session type active at a time.
-# Connect requests don't need locking - each user has their own dedicated cluster.
+# PySpark's JVM can only have one session type (Connect or Regular) active at
+# a time. This lock serializes ALL session creation to prevent mode conflicts.
+# - Connect: Holds lock during session CREATION only, then releases
+# - Standalone: Holds lock for ENTIRE request duration (create + query + cleanup)
 # =============================================================================
-_standalone_request_lock = threading.RLock()
+_session_mode_lock = threading.RLock()
 
 
 def read_user_minio_credentials(username: str) -> tuple[str, str]:
@@ -255,10 +256,11 @@ def get_spark_session(
     1. Try user's Spark Connect server (sc://jupyter-{username}:15002)
     2. Fall back to shared Spark cluster (spark://sharedsparkclustermaster.prod:7077)
 
-    Mode Isolation:
-    - Standalone requests hold _standalone_request_lock for ENTIRE request duration
-    - Connect requests run concurrently (each user has dedicated cluster)
-    - This prevents mode conflicts where stopping one session kills another
+    Session Mode Locking:
+    - ALL session creation is serialized via _session_mode_lock
+    - Connect: Lock held during creation only; queries run concurrently after
+    - Standalone: Lock held for entire request (creation + query + cleanup)
+    - This prevents mode conflicts (PySpark JVM only supports one session type)
 
     Usage in endpoints:
         @app.get("/databases")
@@ -337,7 +339,7 @@ def get_spark_session(
             "Spark Connect port reachable, acquiring session lock for Connect mode..."
         )
 
-        with _standalone_request_lock:
+        with _session_mode_lock:
             logger.info("Session lock acquired for Connect mode")
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
@@ -372,7 +374,7 @@ def get_spark_session(
 
         # CRITICAL: Hold the lock for the ENTIRE request lifecycle
         # This serializes standalone requests but prevents mode conflicts
-        with _standalone_request_lock:
+        with _session_mode_lock:
             logger.info("Standalone request lock acquired")
 
             # Use shared cluster master URL
