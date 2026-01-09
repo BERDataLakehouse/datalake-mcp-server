@@ -498,61 +498,11 @@ def get_spark_session(
         _clear_spark_env_for_mode_switch(use_spark_connect)
 
         # ==========================================================================
-        # MODE CONFLICT RESOLUTION
+        # NOTE: Mode conflict resolution is handled at the request level in
+        # dependencies.py via _standalone_request_lock. Standalone requests hold
+        # the lock for their entire lifecycle, ensuring mode switches only happen
+        # when no standalone request is in progress.
         # ==========================================================================
-        # PySpark cannot have both a regular SparkSession and a Spark Connect session
-        # active simultaneously. If we're switching modes, we must stop the existing
-        # session first.
-        #
-        # IMPORTANT: SparkSession.getActiveSession() is THREAD-LOCAL and won't see
-        # sessions created by other threads. But the JVM-level SparkSession is GLOBAL.
-        # We must check the class-level _instantiatedSession which is shared across threads.
-        #
-        # This is safe because:
-        # - Standalone sessions are transient (stopped after each request anyway)
-        # - Connect sessions are per-user (safe to recreate for different user/mode)
-        # ==========================================================================
-
-        # Check for existing session at class level (shared across threads)
-        existing_session = getattr(SparkSession, "_instantiatedSession", None)
-        if existing_session is not None:
-            # Determine if existing session is Spark Connect or regular
-            # Connect sessions have no SparkContext (_sc is None or doesn't exist)
-            try:
-                is_existing_connect = existing_session._sc is None
-            except AttributeError:
-                # Spark Connect sessions may not have _sc attribute at all
-                is_existing_connect = True
-
-            logger.info(
-                f"Found existing session: is_connect={is_existing_connect}, "
-                f"want_connect={use_spark_connect}"
-            )
-
-            if use_spark_connect and not is_existing_connect:
-                # Trying to create Connect session, but regular session exists → stop it
-                logger.warning(
-                    "MODE CONFLICT: Stopping regular Spark session to allow Spark Connect. "
-                    "This may interrupt an in-progress standalone request."
-                )
-                try:
-                    existing_session.stop()
-                    # Also clear the class-level reference
-                    SparkSession._instantiatedSession = None
-                except Exception as e:
-                    logger.warning(f"Error stopping regular session: {e}")
-            elif not use_spark_connect and is_existing_connect:
-                # Trying to create regular session, but Connect session exists → stop it
-                logger.warning(
-                    "MODE CONFLICT: Stopping Spark Connect session to allow regular session. "
-                    "This is safe as Connect sessions are per-user."
-                )
-                try:
-                    existing_session.stop()
-                    # Also clear the class-level reference
-                    SparkSession._instantiatedSession = None
-                except Exception as e:
-                    logger.warning(f"Error stopping Connect session: {e}")
 
         # Clear builder's cached options to prevent conflicts
         builder = SparkSession.builder
