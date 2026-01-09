@@ -497,6 +497,46 @@ def get_spark_session(
         # PySpark 3.4+ uses environment variables to determine mode
         _clear_spark_env_for_mode_switch(use_spark_connect)
 
+        # ==========================================================================
+        # MODE CONFLICT RESOLUTION
+        # ==========================================================================
+        # PySpark cannot have both a regular SparkSession and a Spark Connect session
+        # active simultaneously. If we're switching modes, we must stop the existing
+        # session first. This is safe because:
+        # - Standalone sessions are transient (stopped after each request anyway)
+        # - Connect sessions are per-user (safe to recreate for different user/mode)
+        # ==========================================================================
+        active = SparkSession.getActiveSession()
+        if active is not None:
+            # Determine if active session is Spark Connect or regular
+            # Connect sessions have no SparkContext (_sc is None or doesn't exist)
+            try:
+                is_active_connect = active._sc is None
+            except AttributeError:
+                # Spark Connect sessions may not have _sc attribute at all
+                is_active_connect = True
+
+            if use_spark_connect and not is_active_connect:
+                # Trying to create Connect session, but regular session exists → stop it
+                logger.warning(
+                    "Stopping regular Spark session to allow Spark Connect session creation. "
+                    "This may interrupt an in-progress standalone request."
+                )
+                try:
+                    active.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping regular session: {e}")
+            elif not use_spark_connect and is_active_connect:
+                # Trying to create regular session, but Connect session exists → stop it
+                logger.warning(
+                    "Stopping Spark Connect session to allow regular session creation. "
+                    "This is safe as Connect sessions are per-user."
+                )
+                try:
+                    active.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping Connect session: {e}")
+
         # Clear builder's cached options to prevent conflicts
         builder = SparkSession.builder
         if hasattr(builder, "_options"):
