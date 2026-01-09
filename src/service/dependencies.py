@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import socket
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Generator
@@ -61,6 +62,16 @@ def sanitize_k8s_name(name: str) -> str:
 
 DEFAULT_SPARK_POOL = "default"
 SPARK_CONNECT_PORT = "15002"
+
+# =============================================================================
+# SESSION MODE LOCK
+# =============================================================================
+# PySpark's JVM can only have one session type (Connect or Regular) active at
+# a time. This lock serializes ALL session creation to prevent mode conflicts.
+# - Connect: Holds lock during session CREATION only, then releases
+# - Standalone: Holds lock for ENTIRE request duration (create + query + cleanup)
+# =============================================================================
+_session_mode_lock = threading.RLock()
 
 
 def read_user_minio_credentials(username: str) -> tuple[str, str]:
@@ -245,6 +256,12 @@ def get_spark_session(
     1. Try user's Spark Connect server (sc://jupyter-{username}:15002)
     2. Fall back to shared Spark cluster (spark://sharedsparkclustermaster.prod:7077)
 
+    Session Mode Locking:
+    - ALL session creation is serialized via _session_mode_lock
+    - Connect: Lock held during creation only; queries run concurrently after
+    - Standalone: Lock held for entire request (creation + query + cleanup)
+    - This prevents mode conflicts (PySpark JVM only supports one session type)
+
     Usage in endpoints:
         @app.get("/databases")
         def get_databases(spark: Annotated[SparkSession, Depends(get_spark_session)]):
@@ -263,76 +280,102 @@ def get_spark_session(
     Raises:
         Exception: If user is not authenticated or both connection methods fail
     """
-    spark = None
-    using_spark_connect = False  # Track connection mode for cleanup decision
+    # Get authenticated user from request
+    username = get_user_from_request(request)
+
+    logger.info(f"Creating Spark session for user: {username}")
+
+    # Read user's MinIO credentials from their home directory
     try:
-        # Get authenticated user from request
-        username = get_user_from_request(request)
+        minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+        logger.debug(f"Loaded MinIO credentials for user {username}")
+    except FileNotFoundError as e:
+        logger.error(f"MinIO credentials file not found for {username}: {e}")
+        raise Exception(
+            f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
+            f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        raise Exception(
+            f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+        )
 
-        logger.info(f"Creating Spark session for user: {username}")
+    # Build base user-specific settings
+    base_user_settings = {
+        "USER": username,
+        "MINIO_ACCESS_KEY": minio_access_key,
+        "MINIO_SECRET_KEY": minio_secret_key,
+        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+        "MINIO_SECURE": settings.MINIO_SECURE,
+        "SPARK_HOME": settings.SPARK_HOME,
+        "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
+        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
+        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
+        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
+        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
+        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
+        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
+        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
+        "BERDL_POD_IP": settings.BERDL_POD_IP,
+    }
 
-        # Read user's MinIO credentials from their home directory
-        try:
-            minio_access_key, minio_secret_key = read_user_minio_credentials(username)
-            logger.debug(f"Loaded MinIO credentials for user {username}")
-        except FileNotFoundError as e:
-            logger.error(f"MinIO credentials file not found for {username}: {e}")
-            raise Exception(
-                f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
-                f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
-                exc_info=True,
-            )
-            raise Exception(
-                f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
-            )
+    # Try Spark Connect first with TCP pre-flight check
+    spark_connect_url = construct_user_spark_connect_url(username)
+    logger.info(f"Checking Spark Connect availability: {spark_connect_url}")
 
-        # Build base user-specific settings
-        base_user_settings = {
-            "USER": username,
-            "MINIO_ACCESS_KEY": minio_access_key,
-            "MINIO_SECRET_KEY": minio_secret_key,
-            "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-            "MINIO_SECURE": settings.MINIO_SECURE,
-            "SPARK_HOME": settings.SPARK_HOME,
-            "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
-            "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
-            "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
-            "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
-            "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
-            "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
-            "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
-            "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
-            "BERDL_POD_IP": settings.BERDL_POD_IP,
-        }
+    # Quick TCP check to see if Spark Connect port is reachable
+    if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
+        # =======================================================================
+        # SPARK CONNECT MODE
+        # Must acquire lock to prevent creating Connect session while Standalone
+        # session is active (JVM can only have one session type at a time).
+        # Lock is only held during session CREATION, not the entire request.
+        # =======================================================================
+        logger.info(
+            "Spark Connect port reachable, acquiring session lock for Connect mode..."
+        )
 
-        # Try Spark Connect first with TCP pre-flight check
-        spark_connect_url = construct_user_spark_connect_url(username)
-        logger.info(f"Checking Spark Connect availability: {spark_connect_url}")
-
-        # Quick TCP check to see if Spark Connect port is reachable
-        if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
-            logger.info(
-                f"Spark Connect port reachable, attempting connection: {spark_connect_url}"
-            )
+        with _session_mode_lock:
+            logger.info("Session lock acquired for Connect mode")
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
                 **base_user_settings,
             )
 
-            using_spark_connect = True
             spark = _get_spark_session(
                 app_name=f"datalake_mcp_server_{username}",
                 settings=user_settings,
                 use_spark_connect=True,
             )
-
             logger.info(f"✅ Connected via Spark Connect for user {username}")
-        else:
-            logger.info("Spark Connect port unreachable, using shared Spark cluster")
+
+        logger.info("Session lock released for Connect mode")
+
+        # Yield session OUTSIDE the lock - Connect sessions can run concurrently
+        # once created (they use the user's dedicated cluster)
+        yield spark
+
+        # No cleanup: Connect sessions belong to user's notebook pod
+        logger.debug(
+            "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
+        )
+    else:
+        # =======================================================================
+        # STANDALONE MODE (hold lock for ENTIRE request to prevent mode conflicts)
+        # =======================================================================
+        logger.info(
+            "Spark Connect port unreachable, using shared Spark cluster. "
+            "Acquiring standalone request lock..."
+        )
+
+        # CRITICAL: Hold the lock for the ENTIRE request lifecycle
+        # This serializes standalone requests but prevents mode conflicts
+        with _session_mode_lock:
+            logger.info("Standalone request lock acquired")
 
             # Use shared cluster master URL
             shared_master_url = os.getenv(
@@ -361,41 +404,30 @@ def get_spark_session(
                 settings=fallback_settings,
                 use_spark_connect=False,
             )
-            # using_spark_connect remains False for shared cluster
 
             logger.info(
                 f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url} "
                 f"(MinIO access key: {minio_access_key[:10]}...)"
             )
 
-        # Yield the spark session to the endpoint
-        yield spark
-
-    finally:
-        # Cleanup logic depends on connection mode:
-        # - Spark Connect: Don't stop the session. The Spark cluster belongs to the user's
-        #   notebook pod, not to us. Calling spark.stop() causes race conditions with
-        #   Spark Connect's internal thread pool cleanup (_release_thread_pool).
-        # - Shared Cluster: Must stop the session to release cluster resources and prevent
-        #   credential leakage between users.
-        if spark is not None and not using_spark_connect:
             try:
-                logger.info("Stopping Spark session (shared cluster cleanup)")
-                # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
-                # This is a belt-and-suspenders approach alongside fs.s3a.impl.disable.cache
-                # In shared cluster mode, the S3A FileSystem caches credentials at JVM level
+                # Yield session while holding the lock
+                yield spark
+            finally:
+                # Cleanup: Must stop session to release cluster resources
                 try:
-                    hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
-                    hadoop_fs.closeAll()
-                    logger.info("Cleared Hadoop FileSystem cache")
-                except Exception as fs_err:
-                    logger.info(f"Could not clear FileSystem cache: {fs_err}")
+                    logger.info("Stopping Spark session (shared cluster cleanup)")
+                    # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
+                    try:
+                        hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
+                        hadoop_fs.closeAll()
+                        logger.info("Cleared Hadoop FileSystem cache")
+                    except Exception as fs_err:
+                        logger.info(f"Could not clear FileSystem cache: {fs_err}")
 
-                spark.stop()
-                logger.info("Spark session stopped successfully")
-            except Exception as e:
-                logger.error(f"Error stopping Spark session: {e}", exc_info=True)
-        elif spark is not None:
-            logger.debug(
-                "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
-            )
+                    spark.stop()
+                    logger.info("Spark session stopped successfully")
+                except Exception as e:
+                    logger.error(f"Error stopping Spark session: {e}", exc_info=True)
+
+            logger.info("Standalone request lock released")

@@ -497,6 +497,14 @@ def get_spark_session(
         # PySpark 3.4+ uses environment variables to determine mode
         _clear_spark_env_for_mode_switch(use_spark_connect)
 
+        # ==========================================================================
+        # NOTE: Mode conflict resolution is handled at the request level in
+        # dependencies.py via _session_mode_lock. This lock serializes ALL session
+        # creation (both Connect and Standalone) to prevent the JVM from having
+        # conflicting session types. Standalone requests hold the mode lock for
+        # their entire lifecycle, ensuring mode switches only happen after cleanup.
+        # ==========================================================================
+
         # Clear builder's cached options to prevent conflicts
         builder = SparkSession.builder
         if hasattr(builder, "_options"):
