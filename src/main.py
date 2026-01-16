@@ -52,8 +52,10 @@ class RequestTimeoutMiddleware(BaseHTTPMiddleware):
         self.timeout_seconds = timeout_seconds
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Skip timeout for health checks to ensure they respond quickly
-        if request.url.path in ("/health", "/health/ready", "/health/live"):
+        # Skip timeout for health checks to ensure they respond quickly,
+        # regardless of any application root path prefix (e.g., "/apis/mcp").
+        path = request.url.path
+        if path.endswith("/health"):
             return await call_next(request)
 
         try:
@@ -126,9 +128,12 @@ def create_application() -> FastAPI:
     app.add_exception_handler(Exception, universal_error_handler)
 
     # Add middleware (order matters - outermost middleware is added last)
-    # 1. GZip compresses responses
-    # 2. RequestTimeout ensures we return 408 before proxy returns 504
-    # 3. Auth handles authentication
+    # Middleware stack (request path: outermost → innermost):
+    # - AuthMiddleware: runs first on incoming requests to handle authentication.
+    # - RequestTimeoutMiddleware: wraps the entire request processing (including GZip)
+    #   and ensures we return 408 before the proxy returns 504.
+    # - GZipMiddleware: innermost; compresses responses before they pass back through
+    #   the timeout and auth middleware on the response path.
     app.add_middleware(GZipMiddleware)
     app.add_middleware(
         RequestTimeoutMiddleware,
