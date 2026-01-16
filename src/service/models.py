@@ -151,9 +151,9 @@ class TableQueryRequest(BaseModel):
         Field(
             description="Maximum number of rows to return",
             gt=0,
-            le=50000,
+            le=1000,
         ),
-    ] = 1000
+    ] = 100
     offset: Annotated[
         int,
         Field(
