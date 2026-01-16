@@ -30,6 +30,15 @@ class Settings(BaseModel):
         default=os.getenv("LOG_LEVEL", "INFO"),
         description="Logging level for the application",
     )
+    # HTTP request timeout - should be shorter than proxy/gateway timeout
+    # to ensure the server returns a clean 408 before proxy returns 504
+    request_timeout_seconds: float = Field(
+        default=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "55")),
+        description=(
+            "Maximum time in seconds for HTTP requests before returning 408 timeout. "
+            "Set this lower than your proxy/gateway timeout (e.g., 55s if proxy is 60s)."
+        ),
+    )
 
 
 @lru_cache()
