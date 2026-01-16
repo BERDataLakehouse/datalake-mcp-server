@@ -12,6 +12,8 @@ on:
 jobs:
   build:
     uses: BERDataLakehouse/.github/.github/workflows/build_docker_image.yaml@main
+    with:
+      free_disk_space: true
     permissions:
       contents: read
       packages: write
