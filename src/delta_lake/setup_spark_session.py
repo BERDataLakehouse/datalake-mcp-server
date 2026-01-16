@@ -173,7 +173,9 @@ def _get_executor_conf(
         "spark.executor.cores": str(settings.SPARK_WORKER_CORES),
         "spark.executor.memory": executor_memory,
         # Limit total cores for standalone mode (without this, Spark allocates all available)
-        "spark.cores.max": str(settings.SPARK_WORKER_CORES * settings.SPARK_WORKER_COUNT),
+        "spark.cores.max": str(
+            settings.SPARK_WORKER_CORES * settings.SPARK_WORKER_COUNT
+        ),
         # Disable dynamic allocation since we're setting explicit instances
         "spark.dynamicAllocation.enabled": "false",
         "spark.dynamicAllocation.shuffleTracking.enabled": "false",
