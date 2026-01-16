@@ -151,9 +151,9 @@ class TableQueryRequest(BaseModel):
         Field(
             description="Maximum number of rows to return",
             gt=0,
-            le=50000,
+            le=1000,
         ),
-    ] = 1000
+    ] = 100
     offset: Annotated[
         int,
         Field(
@@ -201,7 +201,7 @@ class TableSampleRequest(BaseModel):
     limit: Annotated[
         int,
         Field(
-            description="Maximum number of rows to return in the sample", gt=0, le=1000
+            description="Maximum number of rows to return in the sample", gt=0, le=100
         ),
     ] = 10
     columns: Annotated[
@@ -367,7 +367,7 @@ class TableSelectRequest(BaseModel):
         Field(
             description="Maximum number of rows to return",
             gt=0,
-            le=10000,
+            le=1000,
         ),
     ] = 100
     offset: Annotated[

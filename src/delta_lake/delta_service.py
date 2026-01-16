@@ -35,9 +35,9 @@ from src.service.models import (
 logger = logging.getLogger(__name__)
 
 # Row limits to prevent OOM and ensure service stability
-MAX_SAMPLE_ROWS = 1000
-MAX_QUERY_ROWS = 50000  # Maximum rows returned by arbitrary SQL queries
-MAX_SELECT_ROWS = 10000  # Maximum rows for structured SELECT (enforced in model)
+MAX_SAMPLE_ROWS = 100
+MAX_QUERY_ROWS = 1000  # Maximum rows returned by arbitrary SQL queries
+MAX_SELECT_ROWS = 1000  # Maximum rows for structured SELECT (enforced in model)
 CACHE_EXPIRY_SECONDS = 3600  # Cache results for 1 hour by default
 
 # Common SQL keywords that might indicate destructive operations
