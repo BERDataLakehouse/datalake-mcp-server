@@ -806,7 +806,7 @@ class TestSampleDeltaTable:
             delta_service.sample_delta_table(spark, "db", "table", limit=0)
 
         with pytest.raises(ValueError, match="Limit must be between"):
-            delta_service.sample_delta_table(spark, "db", "table", limit=1000)
+            delta_service.sample_delta_table(spark, "db", "table", limit=101)
 
     def test_sample_uses_cache(self, mock_spark_session):
         """Test that sample uses cached results."""
