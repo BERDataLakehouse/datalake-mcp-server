@@ -33,10 +33,10 @@ class Settings(BaseModel):
     # HTTP request timeout - should be shorter than proxy/gateway timeout
     # to ensure the server returns a clean 408 before proxy returns 504
     request_timeout_seconds: float = Field(
-        default=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "95")),
+        default=float(os.getenv("REQUEST_TIMEOUT_SECONDS", "55")),
         description=(
             "Maximum time in seconds for HTTP requests before returning 408 timeout. "
-            "Set this lower than your proxy/gateway timeout (e.g., 95s if proxy is 100s)."
+            "Set this lower than your proxy/gateway timeout (e.g., 55s if proxy is 60s)."
         ),
     )
 
