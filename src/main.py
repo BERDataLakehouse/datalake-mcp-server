@@ -2,12 +2,14 @@
 Main application module for the Spark Manager API.
 """
 
+import asyncio
 import logging
 import os
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security.utils import get_authorization_scheme_param
 from fastapi_mcp import FastApiMCP
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -26,6 +28,57 @@ logger = logging.getLogger(__name__)
 
 # Middleware constants
 _SCHEME = "Bearer"
+
+
+class RequestTimeoutMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to enforce HTTP request timeouts.
+
+    Returns a clean 408 Request Timeout response before upstream proxies/gateways
+    return 504 Gateway Timeout with HTML error pages. This ensures clients receive
+    a user-friendly JSON error message instead of raw HTML.
+    """
+
+    def __init__(self, app, timeout_seconds: float = 55.0):
+        """
+        Initialize the timeout middleware.
+
+        Args:
+            app: The FastAPI/Starlette application.
+            timeout_seconds: Maximum request processing time in seconds.
+                Should be set lower than your proxy/gateway timeout.
+        """
+        super().__init__(app)
+        self.timeout_seconds = timeout_seconds
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        # Skip timeout for health checks to ensure they respond quickly
+        if request.url.path in ("/health", "/health/ready", "/health/live"):
+            return await call_next(request)
+
+        try:
+            return await asyncio.wait_for(
+                call_next(request),
+                timeout=self.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Request timeout after {self.timeout_seconds}s: "
+                f"{request.method} {request.url.path}"
+            )
+            return JSONResponse(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                content={
+                    "error": 40800,
+                    "error_type": "request_timeout",
+                    "message": (
+                        f"Request timed out after {self.timeout_seconds} seconds. "
+                        "The operation took too long to complete. "
+                        "Consider using pagination, reducing query scope, "
+                        "or breaking up large operations into smaller requests."
+                    ),
+                },
+            )
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -72,8 +125,15 @@ def create_application() -> FastAPI:
     # Add exception handlers
     app.add_exception_handler(Exception, universal_error_handler)
 
-    # Add middleware
+    # Add middleware (order matters - outermost middleware is added last)
+    # 1. GZip compresses responses
+    # 2. RequestTimeout ensures we return 408 before proxy returns 504
+    # 3. Auth handles authentication
     app.add_middleware(GZipMiddleware)
+    app.add_middleware(
+        RequestTimeoutMiddleware,
+        timeout_seconds=settings.request_timeout_seconds,
+    )
     app.add_middleware(AuthMiddleware)
 
     # Include routers
