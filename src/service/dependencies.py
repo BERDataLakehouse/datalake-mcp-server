@@ -70,8 +70,13 @@ SPARK_CONNECT_PORT = "15002"
 # a time. This lock serializes ALL session creation to prevent mode conflicts.
 # - Connect: Holds lock during session CREATION only, then releases
 # - Standalone: Holds lock for ENTIRE request duration (create + query + cleanup)
+#
+# IMPORTANT: We use Semaphore(1) instead of RLock because FastAPI runs generator
+# cleanup in a different thread than where the lock was acquired. RLock has
+# thread affinity (only acquiring thread can release), causing "cannot release
+# un-acquired lock" errors. Semaphore can be released by any thread.
 # =============================================================================
-_session_mode_lock = threading.RLock()
+_session_mode_lock = threading.Semaphore(1)
 
 
 def read_user_minio_credentials(username: str) -> tuple[str, str]:
