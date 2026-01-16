@@ -109,10 +109,9 @@ def mock_spark_dataframe(mock_spark_row):
 
         df = MagicMock()
 
-        # Mock collect() and toLocalIterator() to return rows
+        # Mock collect() to return rows
         rows = [mock_spark_row(row) for row in data]
         df.collect.return_value = rows
-        df.toLocalIterator.return_value = iter(rows)
 
         # Mock count()
         df.count.return_value = count if count is not None else len(data)
