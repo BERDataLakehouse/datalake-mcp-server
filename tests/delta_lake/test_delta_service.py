@@ -806,7 +806,7 @@ class TestSampleDeltaTable:
             delta_service.sample_delta_table(spark, "db", "table", limit=0)
 
         with pytest.raises(ValueError, match="Limit must be between"):
-            delta_service.sample_delta_table(spark, "db", "table", limit=10000)
+            delta_service.sample_delta_table(spark, "db", "table", limit=1000)
 
     def test_sample_uses_cache(self, mock_spark_session):
         """Test that sample uses cached results."""
@@ -1257,15 +1257,15 @@ class TestServiceConstants:
 
     def test_max_sample_rows(self):
         """Test MAX_SAMPLE_ROWS constant."""
-        assert delta_service.MAX_SAMPLE_ROWS == 1000
+        assert delta_service.MAX_SAMPLE_ROWS == 100
 
     def test_max_query_rows(self):
         """Test MAX_QUERY_ROWS constant."""
-        assert delta_service.MAX_QUERY_ROWS == 50000
+        assert delta_service.MAX_QUERY_ROWS == 1000
 
     def test_max_select_rows(self):
         """Test MAX_SELECT_ROWS constant."""
-        assert delta_service.MAX_SELECT_ROWS == 10000
+        assert delta_service.MAX_SELECT_ROWS == 1000
 
     def test_cache_expiry_seconds(self):
         """Test CACHE_EXPIRY_SECONDS constant."""
