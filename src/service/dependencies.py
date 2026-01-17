@@ -21,6 +21,7 @@ from pyspark.sql import SparkSession
 # (copied from berdl_notebook_utils but adapted for shared multi-user service)
 from src.delta_lake.setup_spark_session import get_spark_session as _get_spark_session
 from src.service import app_state
+from src.service.exceptions import MissingTokenError
 from src.service.http_bearer import KBaseHTTPBearer
 from src.settings import BERDLSettings, get_settings
 
@@ -147,7 +148,7 @@ def get_user_from_request(request: Request) -> str:
     """
     user = app_state.get_request_user(request)
     if user is None:
-        raise Exception("User not authenticated. Authorization header required.")
+        raise MissingTokenError("User not authenticated. Authorization header required.")
     return user.user
 
 
