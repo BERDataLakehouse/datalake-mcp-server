@@ -148,7 +148,9 @@ def get_user_from_request(request: Request) -> str:
     """
     user = app_state.get_request_user(request)
     if user is None:
-        raise MissingTokenError("User not authenticated. Authorization header required.")
+        raise MissingTokenError(
+            "User not authenticated. Authorization header required."
+        )
     return user.user
 
 
