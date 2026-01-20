@@ -129,7 +129,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 content=error_response.model_dump(),
             )
-        except Exception as exc:
+        except Exception:
             # Catch any unexpected errors in auth to avoid ASGI ExceptionGroup issues
             logging.exception("Unhandled exception in AuthMiddleware.dispatch")
             error_response = ErrorResponse(
