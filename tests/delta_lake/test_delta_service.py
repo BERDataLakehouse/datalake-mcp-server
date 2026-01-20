@@ -1229,9 +1229,9 @@ class TestConcurrentQueries:
                     with patch(
                         "src.delta_lake.delta_service.run_with_timeout"
                     ) as mock_timeout:
-                        # Call the actual lambda to use the thread-local mocked Spark
-                        # This avoids race conditions from patching a global with
-                        # a hardcoded side_effect in concurrent threads
+                        # Call the provided function directly so it uses the per-thread
+                        # mocked Spark from the fixture, instead of a shared global
+                        # side_effect list that could cause race conditions
                         mock_timeout.side_effect = lambda fn, **kwargs: fn()
                         result = delta_service.query_delta_table(
                             spark,
