@@ -129,6 +129,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 status_code=status_code,
                 content=error_response.model_dump(),
             )
+        except Exception as exc:
+            # Catch any unexpected errors in auth to avoid ASGI ExceptionGroup issues
+            logging.exception("Unhandled exception in AuthMiddleware.dispatch")
+            error_response = ErrorResponse(
+                error=None,
+                error_type=None,
+                message="Internal authentication error",
+            )
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=error_response.model_dump(),
+            )
 
 
 def create_application() -> FastAPI:
