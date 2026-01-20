@@ -1365,7 +1365,8 @@ class TestQueryDeltaTableCachedCount:
             # Second call (for count): returns cached count
             mock_cache_get.side_effect = [
                 None,  # Data cache miss
-                [{"count": 250}],  # Count cache hit
+                [{"count": 250}],  # Count cache hit; cached value uses the same shape
+                # as a Spark collect() result for a COUNT(*) query (list of row dicts)
             ]
             with patch("src.delta_lake.delta_service._store_in_cache"):
                 with patch(
