@@ -415,9 +415,10 @@ def get_spark_session(
         except Exception as e:
             # Spark Connect session creation failed despite health check passing
             # This can happen due to race conditions or transient network issues
-            logger.warning(
+            logger.error(
                 f"Spark Connect session creation failed for {username}, "
-                f"falling back to shared cluster: {type(e).__name__}: {e}"
+                f"falling back to shared cluster: {type(e).__name__}: {e}",
+                exc_info=True,
             )
             spark_connect_failed = True
 
