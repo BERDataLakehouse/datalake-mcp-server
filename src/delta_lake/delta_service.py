@@ -428,9 +428,7 @@ def query_delta_table(
     base_query = re.sub(r"\s+OFFSET\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
 
     # Check if query has ORDER BY clause
-    has_order_by = bool(
-        re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE)
-    )
+    has_order_by = bool(re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE))
 
     # If using offset without ORDER BY, add default ordering for deterministic pagination
     if offset > 0 and not has_order_by:
