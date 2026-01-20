@@ -1229,10 +1229,10 @@ class TestConcurrentQueries:
                     with patch(
                         "src.delta_lake.delta_service.run_with_timeout"
                     ) as mock_timeout:
-                        # Only data query runs since 1 result < 1000 limit
-                        mock_timeout.side_effect = [
-                            [{"id": i}],  # Data query only
-                        ]
+                        # Call the actual lambda to use the thread-local mocked Spark
+                        # This avoids race conditions from patching a global with
+                        # a hardcoded side_effect in concurrent threads
+                        mock_timeout.side_effect = lambda fn, **kwargs: fn()
                         result = delta_service.query_delta_table(
                             spark,
                             f"SELECT {i} as id FROM dual",
