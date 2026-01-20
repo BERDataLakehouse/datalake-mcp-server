@@ -269,10 +269,10 @@ def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 2.0) -> 
             logger.info(f"gRPC channel ready for {spark_connect_url}")
             return True
         except grpc.FutureTimeoutError:
-            logger.error(f"gRPC channel timeout for {spark_connect_url}")
+            logger.info(f"gRPC channel timeout for {spark_connect_url}")
             return False
         except Exception as e:
-            logger.error(f"gRPC channel check failed for {spark_connect_url}: {e}")
+            logger.info(f"gRPC channel check failed for {spark_connect_url}: {e}")
             return False
         finally:
             channel.close()
