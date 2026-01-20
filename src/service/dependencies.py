@@ -278,7 +278,7 @@ def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 2.0) -> 
             channel.close()
 
     except Exception as e:
-        logger.error(f"Health check failed for {spark_connect_url}: {e}")
+        logger.info(f"Health check failed for {spark_connect_url}: {e}")
         return False
 
 
