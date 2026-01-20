@@ -687,6 +687,10 @@ class TestGetSparkSession:
 
         This test uses shared cluster mode (is_spark_connect_reachable=False)
         to verify cleanup behavior, since Spark Connect mode skips stop().
+
+        Note: The generator catches the exception and does NOT re-raise it.
+        This is intentional to avoid "generator didn't stop after throw()" errors.
+        FastAPI will still propagate the original exception to error handlers.
         """
         mock_request_obj = mock_request(user="testuser")
 
@@ -714,10 +718,13 @@ class TestGetSparkSession:
                             gen = get_spark_session(mock_request_obj, mock_settings)
                             _spark = next(gen)  # noqa: F841
 
-                            # Simulate error during cleanup
+                            # Simulate error thrown into generator (e.g., timeout)
+                            # Generator catches the exception, does cleanup, and returns
+                            # (does NOT re-raise to avoid "generator didn't stop" errors)
                             try:
                                 gen.throw(ValueError("Simulated error"))
-                            except ValueError:
+                            except StopIteration:
+                                # Expected: generator finishes without re-raising
                                 pass
 
                             # Session should still be stopped (shared cluster mode)

@@ -412,15 +412,16 @@ def get_spark_session(
             except GeneratorExit:
                 # Normal cleanup when request completes
                 logger.debug("Spark Connect session generator cleanup (normal exit)")
-                return
             except Exception as e:
                 # Exception thrown into generator (e.g., from timeout middleware)
-                # Must handle cleanly to avoid "generator didn't stop after throw()"
+                # Log and return - FastAPI will propagate the original exception.
+                # Do NOT re-raise here as it causes "generator didn't stop after throw()"
                 logger.warning(
                     f"Exception thrown into Spark Connect generator for {username}: "
                     f"{type(e).__name__}: {e}"
                 )
-                raise
+                # Return without re-raising - FastAPI handles exception propagation
+                return
 
             # No cleanup: Connect sessions belong to user's notebook pod
             logger.debug(
@@ -495,6 +496,18 @@ def get_spark_session(
             try:
                 # Yield session while holding the lock
                 yield spark
+            except GeneratorExit:
+                # Normal cleanup when request completes
+                logger.debug("Standalone Spark session generator cleanup (normal exit)")
+            except Exception as e:
+                # Exception thrown into generator (e.g., from timeout middleware)
+                # Log but do NOT re-raise - FastAPI will propagate the original exception.
+                # Re-raising causes "generator didn't stop after throw()" error.
+                logger.warning(
+                    f"Exception thrown into standalone Spark generator for {username}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                # Fall through to finally block for cleanup, then return
             finally:
                 # Cleanup: Must stop session to release cluster resources
                 try:
