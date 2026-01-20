@@ -535,8 +535,8 @@ class TestIsSparkConnectReachable:
             # gRPC channel uses custom timeout in options
             mock_grpc.insecure_channel.assert_called_once()
             call_args = mock_grpc.insecure_channel.call_args
-            options = dict(call_args[1]["options"])
-            assert options["grpc.connect_timeout_ms"] == 5000  # 5.0 * 1000
+            options = call_args[1]["options"]
+            assert ("grpc.connect_timeout_ms", 5000) in options  # 5.0 * 1000
 
             # channel_ready_future result uses custom timeout
             mock_future.result.assert_called_with(timeout=5.0)
