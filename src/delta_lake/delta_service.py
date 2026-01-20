@@ -427,19 +427,20 @@ def query_delta_table(
     )
     base_query = re.sub(r"\s+OFFSET\s+\d+\s*$", "", base_query, flags=re.IGNORECASE)
 
-    # Check if query has ORDER BY clause
-    has_order_by = bool(re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE))
-
-    # If using offset without ORDER BY, add default ordering for deterministic pagination
-    if offset > 0 and not has_order_by:
-        logger.info(
-            f"Pagination with offset={offset} but query has no ORDER BY clause. "
-            "Adding 'ORDER BY 1' for deterministic pagination."
+    # Warn if using offset without ORDER BY - results may be non-deterministic
+    # Note: We intentionally do NOT add a default ORDER BY because it can cause
+    # significant performance issues (full sort) on large Delta Lake tables.
+    # It's better to warn and let clients add ORDER BY if they need deterministic pagination.
+    if offset > 0:
+        has_order_by = bool(
+            re.search(r"\bORDER\s+BY\b", base_query, flags=re.IGNORECASE)
         )
-        # Add ORDER BY 1 (first column) to ensure consistent ordering across pages
-        # This is a safe default that works with any SELECT query
-        base_query = f"{base_query} ORDER BY 1"
-        has_order_by = True
+        if not has_order_by:
+            logger.warning(
+                f"Pagination with offset={offset} but query has no ORDER BY clause. "
+                "Results may be non-deterministic across pages. "
+                "Add ORDER BY to ensure consistent pagination."
+            )
 
     namespace = "query"
     params = {"query": base_query, "limit": limit, "offset": offset}
