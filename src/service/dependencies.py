@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Annotated, Generator
 from urllib.parse import urlparse
 
+import grpc
 from fastapi import Depends, Request
 from pydantic import AnyUrl
 from pyspark.sql import SparkSession
@@ -212,16 +213,23 @@ def construct_user_spark_connect_url(username: str) -> str:
     return url
 
 
-def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 1.0) -> bool:
+def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 2.0) -> bool:
     """
-    Quick TCP check if Spark Connect server is reachable.
+    Check if Spark Connect server is reachable via gRPC health check.
+
+    This performs a proper gRPC connection attempt rather than just a TCP port check,
+    which ensures the Spark Connect server is actually ready to accept connections.
+    A simple TCP check can pass when:
+    - A load balancer/service mesh fronts the port
+    - Spark Connect is starting up but not ready
+    - Network issues cause intermittent connectivity
 
     Args:
         spark_connect_url: Spark Connect URL (e.g., "sc://jupyter-user.namespace:15002")
-        timeout: Connection timeout in seconds (default: 1.0)
+        timeout: Connection timeout in seconds (default: 2.0)
 
     Returns:
-        True if port is reachable, False otherwise
+        True if Spark Connect server is reachable and responding, False otherwise
     """
     try:
         # Parse URL to extract host and port
@@ -232,18 +240,45 @@ def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 1.0) -> 
         port = parsed.port or 15002  # Default Spark Connect port
 
         if not host:
-            logger.debug(f"Failed to parse hostname from URL: {spark_connect_url}")
+            logger.info(f"Failed to parse hostname from URL: {spark_connect_url}")
             return False
 
-        # Attempt TCP connection
+        # First do a quick TCP check to avoid slow gRPC timeout on unreachable hosts
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
+        sock.settimeout(0.5)  # Quick TCP check
         result = sock.connect_ex((host, port))
         sock.close()
 
-        return result == 0
+        if result != 0:
+            logger.info(f"TCP port check failed for {spark_connect_url}")
+            return False
+
+        # TCP port is open, now verify with a lightweight gRPC connection attempt
+        channel = grpc.insecure_channel(
+            f"{host}:{port}",
+            options=[
+                ("grpc.connect_timeout_ms", int(timeout * 1000)),
+                ("grpc.initial_reconnect_backoff_ms", 100),
+                ("grpc.max_reconnect_backoff_ms", 500),
+            ],
+        )
+
+        try:
+            # Wait for channel to be ready with timeout
+            grpc.channel_ready_future(channel).result(timeout=timeout)
+            logger.info(f"gRPC channel ready for {spark_connect_url}")
+            return True
+        except grpc.FutureTimeoutError:
+            logger.info(f"gRPC channel timeout for {spark_connect_url}")
+            return False
+        except Exception as e:
+            logger.info(f"gRPC channel check failed for {spark_connect_url}: {e}")
+            return False
+        finally:
+            channel.close()
+
     except Exception as e:
-        logger.debug(f"TCP check failed for {spark_connect_url}: {e}")
+        logger.error(f"Health check failed for {spark_connect_url}: {e}")
         return False
 
 
@@ -331,12 +366,15 @@ def get_spark_session(
         "BERDL_POD_IP": settings.BERDL_POD_IP,
     }
 
-    # Try Spark Connect first with TCP pre-flight check
+    # Try Spark Connect first with gRPC health check
     spark_connect_url = construct_user_spark_connect_url(username)
     logger.info(f"Checking Spark Connect availability: {spark_connect_url}")
 
-    # Quick TCP check to see if Spark Connect port is reachable
-    if is_spark_connect_reachable(spark_connect_url, timeout=1.0):
+    # gRPC health check to see if Spark Connect server is ready
+    use_spark_connect = is_spark_connect_reachable(spark_connect_url, timeout=2.0)
+    spark_connect_failed = False
+
+    if use_spark_connect:
         # =======================================================================
         # SPARK CONNECT MODE
         # Must acquire lock to prevent creating Connect session while Standalone
@@ -344,39 +382,57 @@ def get_spark_session(
         # Lock is only held during session CREATION, not the entire request.
         # =======================================================================
         logger.info(
-            "Spark Connect port reachable, acquiring session lock for Connect mode..."
+            "Spark Connect server reachable, acquiring session lock for Connect mode..."
         )
 
-        with _session_mode_lock:
-            logger.info("Session lock acquired for Connect mode")
-            user_settings = BERDLSettings(
-                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                **base_user_settings,
+        try:
+            with _session_mode_lock:
+                logger.info("Session lock acquired for Connect mode")
+                user_settings = BERDLSettings(
+                    SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                    **base_user_settings,
+                )
+
+                spark = _get_spark_session(
+                    app_name=f"datalake_mcp_server_{username}",
+                    settings=user_settings,
+                    use_spark_connect=True,
+                )
+                logger.info(f"✅ Connected via Spark Connect for user {username}")
+
+            logger.info("Session lock released for Connect mode")
+
+            # Yield session OUTSIDE the lock - Connect sessions can run concurrently
+            # once created (they use the user's dedicated cluster)
+            yield spark
+
+            # No cleanup: Connect sessions belong to user's notebook pod
+            logger.debug(
+                "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
             )
+            return  # Successfully completed with Spark Connect
 
-            spark = _get_spark_session(
-                app_name=f"datalake_mcp_server_{username}",
-                settings=user_settings,
-                use_spark_connect=True,
+        except Exception as e:
+            # Spark Connect session creation failed despite health check passing
+            # This can happen due to race conditions or transient network issues
+            logger.error(
+                f"Spark Connect session creation failed for {username}, "
+                f"falling back to shared cluster: {type(e).__name__}: {e}",
+                exc_info=True,
             )
-            logger.info(f"✅ Connected via Spark Connect for user {username}")
+            spark_connect_failed = True
 
-        logger.info("Session lock released for Connect mode")
-
-        # Yield session OUTSIDE the lock - Connect sessions can run concurrently
-        # once created (they use the user's dedicated cluster)
-        yield spark
-
-        # No cleanup: Connect sessions belong to user's notebook pod
-        logger.debug(
-            "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
-        )
-    else:
+    if not use_spark_connect or spark_connect_failed:
         # =======================================================================
         # STANDALONE MODE (hold lock for ENTIRE request to prevent mode conflicts)
         # =======================================================================
+        reason = (
+            "Spark Connect session creation failed"
+            if spark_connect_failed
+            else "Spark Connect server unreachable"
+        )
         logger.info(
-            "Spark Connect port unreachable, using shared Spark cluster. "
+            f"{reason}, using shared Spark cluster. "
             "Acquiring standalone request lock..."
         )
 
