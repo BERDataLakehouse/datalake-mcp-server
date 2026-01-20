@@ -123,7 +123,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             error_response = ErrorResponse(
                 error=error_type.error_code if error_type else None,
                 error_type=error_type.error_type if error_type else None,
-                message=str(exc) if str(exc) else "Authentication error",
+                message=str(exc) or "Authentication error",
             )
             return JSONResponse(
                 status_code=status_code,
