@@ -431,7 +431,7 @@ def get_spark_session(
         except Exception as e:
             # Spark Connect session CREATION failed despite health check passing
             # This can happen due to race conditions or transient network issues
-            # Note: This only catches exceptions during session creation (lines 391-400),
+            # Note: This only catches exceptions during session creation (lines 392-406),
             # NOT exceptions from query execution (which happen after the yield above)
             logger.error(
                 f"Spark Connect session creation failed for {username}, "
