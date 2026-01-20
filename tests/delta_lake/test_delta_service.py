@@ -1277,3 +1277,358 @@ class TestServiceConstants:
         assert "delete" in delta_service.FORBIDDEN_KEYWORDS
         assert "insert" in delta_service.FORBIDDEN_KEYWORDS
         assert "update" in delta_service.FORBIDDEN_KEYWORDS
+
+
+# =============================================================================
+# Additional Coverage Tests
+# =============================================================================
+
+
+class TestQueryValidationEdgeCases:
+    """Additional tests for query validation edge cases."""
+
+    def test_sqlparse_exception_handling(self):
+        """Test that sqlparse exceptions are wrapped in SparkQueryError."""
+        # Test with query that might cause sqlparse issues
+        with patch("src.delta_lake.delta_service.sqlparse.parse") as mock_parse:
+            mock_parse.side_effect = Exception("Parse error")
+            with pytest.raises(SparkQueryError, match="not a valid SQL query"):
+                delta_service._check_query_is_valid("INVALID SQL {{{{")
+
+
+class TestQueryLimitEdgeCases:
+    """Additional tests for query limit enforcement."""
+
+    def test_query_limit_exceeds_max_in_query_delta_table(self, mock_spark_session):
+        """Test that query_delta_table rejects limit > MAX_QUERY_ROWS."""
+        spark = mock_spark_session()
+
+        with pytest.raises(SparkQueryError, match="exceeds maximum"):
+            delta_service.query_delta_table(
+                spark, "SELECT * FROM users", limit=2000, use_cache=False
+            )
+
+
+class TestSampleDeltaTableEdgeCases:
+    """Additional tests for sample_delta_table edge cases."""
+
+    def test_sample_timeout_reraises(self, mock_spark_session):
+        """Test that timeout errors are re-raised as-is."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    side_effect=SparkTimeoutError(operation="sample", timeout=30),
+                ):
+                    with pytest.raises(SparkTimeoutError):
+                        delta_service.sample_delta_table(
+                            spark, "db", "table", use_cache=False
+                        )
+
+    def test_sample_spark_error_wrapped(self, mock_spark_session):
+        """Test that generic Spark errors are wrapped in SparkOperationError."""
+        spark = mock_spark_session()
+        spark.table.return_value.limit.return_value.collect.side_effect = Exception(
+            "Spark error"
+        )
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    side_effect=lambda func, **kwargs: func(),
+                ):
+                    with pytest.raises(SparkOperationError, match="Failed to sample"):
+                        delta_service.sample_delta_table(
+                            spark, "db", "table", use_cache=False
+                        )
+
+
+class TestQueryDeltaTableCachedCount:
+    """Tests for query_delta_table cached count behavior."""
+
+    def test_query_uses_cached_count(self, mock_spark_session):
+        """Test that query uses cached count when page is full."""
+        spark = mock_spark_session()
+
+        # Return exactly 10 results (== limit), so COUNT should run
+        data_results = [{"id": i} for i in range(10)]
+
+        with patch("src.delta_lake.delta_service._get_from_cache") as mock_cache_get:
+            # First call (for data): returns None
+            # Second call (for count): returns cached count
+            mock_cache_get.side_effect = [
+                None,  # Data cache miss
+                [{"count": 250}],  # Count cache hit
+            ]
+            with patch("src.delta_lake.delta_service._store_in_cache"):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    # Only data query runs (count is cached)
+                    mock_timeout.side_effect = [data_results]
+                    result = delta_service.query_delta_table(
+                        spark,
+                        "SELECT * FROM users",
+                        limit=10,
+                        use_cache=True,
+                    )
+
+        assert result.pagination.total_count == 250
+        assert result.pagination.has_more is True
+        # Verify only 1 timeout call (data query only, count from cache)
+        assert mock_timeout.call_count == 1
+
+    def test_query_spark_error_wrapped(self, mock_spark_session):
+        """Test that query spark errors are wrapped in SparkOperationError."""
+        spark = mock_spark_session()
+        spark.sql.return_value.collect.side_effect = Exception("Query failed")
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch(
+                "src.delta_lake.delta_service.run_with_timeout",
+                side_effect=lambda func, **kwargs: func(),
+            ):
+                with pytest.raises(SparkOperationError, match="Failed to execute"):
+                    delta_service.query_delta_table(
+                        spark, "SELECT * FROM users", use_cache=False
+                    )
+
+    def test_query_validation_error_reraises(self, mock_spark_session):
+        """Test that SparkQueryError from validation is re-raised as-is."""
+        spark = mock_spark_session()
+
+        # Use an invalid query that will fail validation
+        with pytest.raises(SparkQueryError):
+            delta_service.query_delta_table(spark, "DROP TABLE users", use_cache=False)
+
+
+class TestEscapeValueEdgeCases:
+    """Additional tests for _escape_value edge cases."""
+
+    def test_escape_other_types(self):
+        """Test escaping non-standard types (list, dict, etc.)."""
+        # List gets converted to string
+        result = delta_service._escape_value([1, 2, 3])
+        assert result == "'[1, 2, 3]'"
+
+        # Dict gets converted to string
+        result = delta_service._escape_value({"key": "value"})
+        assert "key" in result
+
+    def test_escape_value_with_quotes_in_object(self):
+        """Test escaping object with quotes when converted to string."""
+
+        # Object with single quotes in its string representation
+        class QuotedObj:
+            def __str__(self):
+                return "It's quoted"
+
+        result = delta_service._escape_value(QuotedObj())
+        assert result == "'It''s quoted'"
+
+
+class TestBuildFilterClauseEmpty:
+    """Tests for _build_filter_clause with empty conditions."""
+
+    def test_empty_conditions_returns_empty_string(self):
+        """Test that empty conditions list returns empty string."""
+        result = delta_service._build_filter_clause([], "WHERE")
+        assert result == ""
+
+    def test_empty_having_returns_empty_string(self):
+        """Test that empty HAVING conditions returns empty string."""
+        result = delta_service._build_filter_clause([], "HAVING")
+        assert result == ""
+
+
+class TestBuildJoinClause:
+    """Tests for _build_join_clause function."""
+
+    def test_inner_join(self):
+        """Test building INNER JOIN clause."""
+        from src.service.models import JoinClause
+
+        join = JoinClause(
+            join_type="INNER",
+            database="other_db",
+            table="orders",
+            on_left_column="user_id",
+            on_right_column="customer_id",
+        )
+        result = delta_service._build_join_clause(join, "users")
+
+        assert "INNER JOIN" in result
+        assert "`other_db`.`orders`" in result
+        assert "`users`.`user_id`" in result
+        assert "`orders`.`customer_id`" in result
+
+    def test_left_join(self):
+        """Test building LEFT JOIN clause."""
+        from src.service.models import JoinClause
+
+        join = JoinClause(
+            join_type="LEFT",
+            database="db",
+            table="addresses",
+            on_left_column="id",
+            on_right_column="user_id",
+        )
+        result = delta_service._build_join_clause(join, "users")
+
+        assert "LEFT JOIN" in result
+
+    def test_right_join(self):
+        """Test building RIGHT JOIN clause."""
+        from src.service.models import JoinClause
+
+        join = JoinClause(
+            join_type="RIGHT",
+            database="db",
+            table="items",
+            on_left_column="item_id",
+            on_right_column="id",
+        )
+        result = delta_service._build_join_clause(join, "orders")
+
+        assert "RIGHT JOIN" in result
+
+    def test_full_join(self):
+        """Test building FULL JOIN clause."""
+        from src.service.models import JoinClause
+
+        join = JoinClause(
+            join_type="FULL",
+            database="db",
+            table="backup",
+            on_left_column="id",
+            on_right_column="original_id",
+        )
+        result = delta_service._build_join_clause(join, "main")
+
+        assert "FULL JOIN" in result
+
+
+class TestBuildSelectQueryWithJoins:
+    """Tests for build_select_query with JOIN clauses."""
+
+    def test_select_with_join(self):
+        """Test SELECT query with JOIN."""
+        from src.service.models import JoinClause
+
+        request = TableSelectRequest(
+            database="mydb",
+            table="users",
+            joins=[
+                JoinClause(
+                    join_type="INNER",
+                    database="mydb",
+                    table="orders",
+                    on_left_column="id",
+                    on_right_column="user_id",
+                )
+            ],
+        )
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            query = delta_service.build_select_query(request)
+
+        assert "INNER JOIN `mydb`.`orders`" in query
+        assert "ON `users`.`id` = `orders`.`user_id`" in query
+
+
+class TestSelectFromDeltaTableErrors:
+    """Tests for select_from_delta_table error handling."""
+
+    def test_select_count_timeout_raises(self, mock_spark_session):
+        """Test that count query timeout raises SparkTimeoutError."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    side_effect=SparkTimeoutError(operation="count", timeout=30),
+                ):
+                    with pytest.raises(SparkTimeoutError):
+                        request = TableSelectRequest(database="db", table="t")
+                        delta_service.select_from_delta_table(
+                            spark, request, use_cache=False
+                        )
+
+    def test_select_count_error_wrapped(self, mock_spark_session):
+        """Test that count query errors are wrapped in SparkOperationError."""
+        spark = mock_spark_session()
+        spark.sql.return_value.collect.side_effect = Exception("Count failed")
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    side_effect=lambda func, **kwargs: func(),
+                ):
+                    with pytest.raises(SparkOperationError, match="Failed to execute"):
+                        request = TableSelectRequest(database="db", table="t")
+                        delta_service.select_from_delta_table(
+                            spark, request, use_cache=False
+                        )
+
+    def test_select_data_timeout_raises(self, mock_spark_session):
+        """Test that data query timeout raises SparkTimeoutError."""
+        spark = mock_spark_session()
+
+        count_row = MagicMock()
+        count_row.__getitem__ = lambda self, key: 100 if key == "cnt" else None
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    # Count query succeeds, data query times out
+                    mock_timeout.side_effect = [
+                        [count_row],  # Count succeeds
+                        SparkTimeoutError(operation="select", timeout=30),
+                    ]
+                    with pytest.raises(SparkTimeoutError):
+                        request = TableSelectRequest(database="db", table="t")
+                        delta_service.select_from_delta_table(
+                            spark, request, use_cache=False
+                        )
+
+    def test_select_data_error_wrapped(self, mock_spark_session):
+        """Test that data query errors are wrapped in SparkOperationError."""
+        spark = mock_spark_session()
+
+        count_row = MagicMock()
+        count_row.__getitem__ = lambda self, key: 100 if key == "cnt" else None
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    # Count query succeeds, data query fails
+                    mock_timeout.side_effect = [
+                        [count_row],  # Count succeeds
+                        Exception("Data query failed"),  # Data fails
+                    ]
+                    with pytest.raises(SparkOperationError, match="Failed to execute"):
+                        request = TableSelectRequest(database="db", table="t")
+                        delta_service.select_from_delta_table(
+                            spark, request, use_cache=False
+                        )

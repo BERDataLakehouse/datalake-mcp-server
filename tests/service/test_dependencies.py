@@ -452,15 +452,33 @@ class TestIsSparkConnectReachable:
         assert result is False
 
     def test_custom_timeout(self):
-        """Test that custom timeout is used."""
-        with patch("socket.socket") as mock_socket_class:
+        """Test that custom timeout is used for gRPC check (TCP uses fixed 0.5s)."""
+        with (
+            patch("socket.socket") as mock_socket_class,
+            patch("src.service.dependencies.grpc") as mock_grpc,
+        ):
             mock_socket = MagicMock()
             mock_socket.connect_ex.return_value = 0
             mock_socket_class.return_value = mock_socket
 
+            mock_channel = MagicMock()
+            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_future = MagicMock()
+            mock_grpc.channel_ready_future.return_value = mock_future
+
             is_spark_connect_reachable("sc://localhost:15002", timeout=5.0)
 
-            mock_socket.settimeout.assert_called_with(5.0)
+            # TCP check uses fixed 0.5s timeout for quick pre-check
+            mock_socket.settimeout.assert_called_with(0.5)
+
+            # gRPC channel uses custom timeout in options
+            mock_grpc.insecure_channel.assert_called_once()
+            call_args = mock_grpc.insecure_channel.call_args
+            options = dict(call_args[1]["options"])
+            assert options["grpc.connect_timeout_ms"] == 5000  # 5.0 * 1000
+
+            # channel_ready_future result uses custom timeout
+            mock_future.result.assert_called_with(timeout=5.0)
 
     def test_default_port_used_when_missing(self):
         """Test that default port 15002 is used when not specified."""

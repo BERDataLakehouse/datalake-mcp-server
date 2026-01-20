@@ -548,3 +548,235 @@ class TestSparkSessionRequirement:
                             return_json=False,
                             settings=mock_settings,
                         )
+
+
+# =============================================================================
+# Additional Coverage Tests
+# =============================================================================
+
+
+class TestCloseHttpClient:
+    """Tests for _close_http_client function."""
+
+    def test_close_client_when_cached(self):
+        """Test closing HTTP client when one is cached."""
+        data_store._get_http_client.cache_clear()
+
+        with patch("src.delta_lake.data_store.httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
+            # Create a client to cache it
+            data_store._get_http_client()
+
+            # Now close it
+            data_store._close_http_client()
+
+            # Verify close was called
+            mock_client.close.assert_called_once()
+
+        data_store._get_http_client.cache_clear()
+
+    def test_close_client_handles_exception(self):
+        """Test that close handles exceptions gracefully."""
+        data_store._get_http_client.cache_clear()
+
+        with patch("src.delta_lake.data_store.httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.close.side_effect = Exception("Close failed")
+            mock_client_class.return_value = mock_client
+
+            # Create a client
+            data_store._get_http_client()
+
+            # Close should not raise even if close() fails
+            data_store._close_http_client()  # Should not raise
+
+        data_store._get_http_client.cache_clear()
+
+
+class TestGetUserNamespacePrefixesEdgeCases:
+    """Additional tests for _get_user_namespace_prefixes edge cases."""
+
+    def test_handles_group_prefix_error(self, mock_settings):
+        """Test handling when getting group prefix fails for one group."""
+
+        def mock_get(url, **kwargs):
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+
+            params = kwargs.get("params", {})
+
+            if "groups" in url:
+                mock_response.json.return_value = {"groups": ["group1", "group2"]}
+            elif params.get("tenant") == "group1":
+                mock_response.json.return_value = {
+                    "tenant_namespace_prefix": "group1__"
+                }
+            elif params.get("tenant") == "group2":
+                raise Exception("Group2 fetch failed")
+            else:
+                # User namespace prefix (no tenant param)
+                mock_response.json.return_value = {"user_namespace_prefix": "u_user__"}
+
+            return mock_response
+
+        client = MagicMock()
+        client.get = mock_get
+
+        with patch("src.delta_lake.data_store._get_http_client", return_value=client):
+            with patch(
+                "src.delta_lake.data_store.get_settings", return_value=mock_settings
+            ):
+                prefixes = data_store._get_user_namespace_prefixes("test_token")
+
+        # Should have user prefix and group1 prefix, but not group2 (which failed)
+        assert "u_user__" in prefixes
+        assert "group1__" in prefixes
+        assert len(prefixes) == 2
+
+
+class TestGetAccessiblePathsErrors:
+    """Tests for _get_accessible_paths error handling."""
+
+    def test_handles_api_error(self, mock_httpx_client, mock_settings):
+        """Test handling of API errors in accessible paths."""
+        client = MagicMock()
+        client.get.side_effect = Exception("API unavailable")
+
+        with patch("src.delta_lake.data_store._get_http_client", return_value=client):
+            with patch(
+                "src.delta_lake.data_store.get_settings", return_value=mock_settings
+            ):
+                with pytest.raises(Exception, match="Could not get accessible paths"):
+                    data_store._get_accessible_paths("test_token")
+
+
+class TestGetDatabasesEdgeCases:
+    """Additional tests for get_databases edge cases."""
+
+    def test_filter_with_empty_prefixes(self, mock_httpx_client, mock_settings):
+        """Test filtering when no namespace prefixes are found."""
+        client = mock_httpx_client(
+            {
+                "http://localhost:8000/workspaces/me/namespace-prefix": {
+                    "user_namespace_prefix": None  # No prefix
+                },
+                "http://localhost:8000/workspaces/me/groups": {"groups": []},
+                "http://localhost:8000/workspaces/me/accessible-paths": {
+                    "accessible_paths": [
+                        "s3a://cdm-lake/users-sql-warehouse/other/shared.db/t/"
+                    ]
+                },
+            }
+        )
+
+        with patch("src.delta_lake.data_store._get_http_client", return_value=client):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_databases",
+                return_value=["shared", "other_db"],
+            ):
+                with patch(
+                    "src.delta_lake.data_store.get_settings", return_value=mock_settings
+                ):
+                    result = data_store.get_databases(
+                        use_hms=True,
+                        return_json=False,
+                        filter_by_namespace=True,
+                        auth_token="test_token",
+                        settings=mock_settings,
+                    )
+
+        # Only shared databases should be returned (from accessible paths)
+        assert "shared" in result
+
+    def test_filter_error_propagates(self, mock_httpx_client, mock_settings):
+        """Test that filtering errors propagate correctly."""
+        client = MagicMock()
+        client.get.side_effect = Exception("Network error")
+
+        with patch("src.delta_lake.data_store._get_http_client", return_value=client):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_databases",
+                return_value=["db1"],
+            ):
+                with patch(
+                    "src.delta_lake.data_store.get_settings", return_value=mock_settings
+                ):
+                    with pytest.raises(Exception):
+                        data_store.get_databases(
+                            use_hms=True,
+                            filter_by_namespace=True,
+                            auth_token="test_token",
+                            settings=mock_settings,
+                        )
+
+
+class TestGetDbStructureViaSpark:
+    """Tests for get_db_structure via Spark (not HMS)."""
+
+    def test_get_structure_via_spark(self, mock_spark_session, mock_settings):
+        """Test getting database structure via Spark."""
+        spark = mock_spark_session(
+            databases=["db1"], tables={"db1": ["table1", "table2"]}
+        )
+
+        with patch("src.delta_lake.data_store.get_databases", return_value=["db1"]):
+            with patch(
+                "src.delta_lake.data_store.get_tables",
+                return_value=["table1", "table2"],
+            ):
+                result = data_store.get_db_structure(
+                    spark=spark,
+                    use_hms=False,
+                    with_schema=False,
+                    return_json=False,
+                    settings=mock_settings,
+                )
+
+        assert "db1" in result
+        assert result["db1"] == ["table1", "table2"]
+
+    def test_get_structure_with_schema_via_hms(self, mock_spark_session, mock_settings):
+        """Test get_db_structure with schema using HMS for metadata and Spark for schema."""
+        spark = mock_spark_session()
+
+        with patch(
+            "src.delta_lake.data_store.hive_metastore.get_databases",
+            return_value=["db1"],
+        ):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_tables",
+                return_value=["t1"],
+            ):
+                with patch(
+                    "src.delta_lake.data_store._get_tables_with_schemas",
+                    return_value={"t1": [{"name": "id", "type": "int"}]},
+                ):
+                    with patch(
+                        "src.delta_lake.data_store.get_settings",
+                        return_value=mock_settings,
+                    ):
+                        result = data_store.get_db_structure(
+                            spark=spark,
+                            use_hms=True,
+                            with_schema=True,
+                            return_json=False,
+                            settings=mock_settings,
+                        )
+
+        assert result["db1"]["t1"] == [{"name": "id", "type": "int"}]
+
+
+class TestGetTablesViaSpark:
+    """Additional tests for get_tables."""
+
+    def test_get_tables_via_spark_without_session_raises(self, mock_settings):
+        """Test that get_tables via Spark without session raises error."""
+        with pytest.raises(ValueError, match="SparkSession must be provided"):
+            data_store.get_tables(
+                database="testdb",
+                spark=None,
+                use_hms=False,
+                settings=mock_settings,
+            )

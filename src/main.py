@@ -18,8 +18,9 @@ from src.routes import delta, health
 from src.service import app_state
 from src.service.config import configure_logging, get_settings
 from src.service.stateless_http_transport import mount_stateless_mcp
+from src.service.error_mapping import map_error
 from src.service.exception_handlers import universal_error_handler
-from src.service.exceptions import InvalidAuthHeaderError
+from src.service.exceptions import InvalidAuthHeaderError, MCPServerError
 from src.service.models import ErrorResponse
 
 # Configure logging
@@ -84,30 +85,50 @@ class RequestTimeoutMiddleware(BaseHTTPMiddleware):
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware to authenticate users and set them in the request state."""
+    """Middleware to authenticate users and set them in the request state.
+
+    Note: Exception handling is done here instead of relying on FastAPI's
+    exception handlers because BaseHTTPMiddleware runs in a task group,
+    and exceptions raised here can cause ExceptionGroup errors that don't
+    get properly mapped to HTTP responses.
+    """
 
     async def dispatch(self, request: Request, call_next) -> Response:
         request_user = None
         auth_header = request.headers.get("Authorization")
 
-        if auth_header:
-            scheme, credentials = get_authorization_scheme_param(auth_header)
-            if not (scheme and credentials):
-                raise InvalidAuthHeaderError(
-                    f"Authorization header requires {_SCHEME} scheme followed by token"
-                )
-            if scheme.lower() != _SCHEME.lower():
-                # don't put the received scheme in the error message, might be a token
-                raise InvalidAuthHeaderError(
-                    f"Authorization header requires {_SCHEME} scheme"
-                )
+        try:
+            if auth_header:
+                scheme, credentials = get_authorization_scheme_param(auth_header)
+                if not (scheme and credentials):
+                    raise InvalidAuthHeaderError(
+                        f"Authorization header requires {_SCHEME} scheme followed by token"
+                    )
+                if scheme.lower() != _SCHEME.lower():
+                    # don't put the received scheme in the error message, might be a token
+                    raise InvalidAuthHeaderError(
+                        f"Authorization header requires {_SCHEME} scheme"
+                    )
 
-            app_state_obj = app_state.get_app_state(request)
-            request_user = await app_state_obj.auth.get_user(credentials)
+                app_state_obj = app_state.get_app_state(request)
+                request_user = await app_state_obj.auth.get_user(credentials)
 
-        app_state.set_request_user(request, request_user)
+            app_state.set_request_user(request, request_user)
+            return await call_next(request)
 
-        return await call_next(request)
+        except MCPServerError as exc:
+            # Handle auth errors (InvalidTokenError, MissingRoleError, etc.) cleanly
+            # without letting them propagate as ASGI ExceptionGroup errors
+            error_type, status_code = map_error(exc)
+            error_response = ErrorResponse(
+                error=error_type.error_code if error_type else None,
+                error_type=error_type.error_type if error_type else None,
+                message=str(exc) if str(exc) else "Authentication error",
+            )
+            return JSONResponse(
+                status_code=status_code,
+                content=error_response.model_dump(),
+            )
 
 
 def create_application() -> FastAPI:
