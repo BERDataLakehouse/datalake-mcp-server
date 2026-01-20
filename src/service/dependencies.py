@@ -278,7 +278,10 @@ def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 2.0) -> 
             channel.close()
 
     except Exception as e:
-        logger.error(f"Health check failed for {spark_connect_url}: {e}")
+        # Log as INFO, not ERROR - DNS failures are expected when user's notebook
+        # isn't running (e.g., service account users). The system will fall back
+        # to shared cluster, so this is a normal operational path.
+        logger.info(f"Health check failed for {spark_connect_url}: {e}")
         return False
 
 
@@ -404,7 +407,20 @@ def get_spark_session(
 
             # Yield session OUTSIDE the lock - Connect sessions can run concurrently
             # once created (they use the user's dedicated cluster)
-            yield spark
+            try:
+                yield spark
+            except GeneratorExit:
+                # Normal cleanup when request completes
+                logger.debug("Spark Connect session generator cleanup (normal exit)")
+                return
+            except Exception as e:
+                # Exception thrown into generator (e.g., from timeout middleware)
+                # Must handle cleanly to avoid "generator didn't stop after throw()"
+                logger.warning(
+                    f"Exception thrown into Spark Connect generator for {username}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise
 
             # No cleanup: Connect sessions belong to user's notebook pod
             logger.debug(
@@ -413,8 +429,10 @@ def get_spark_session(
             return  # Successfully completed with Spark Connect
 
         except Exception as e:
-            # Spark Connect session creation failed despite health check passing
+            # Spark Connect session CREATION failed despite health check passing
             # This can happen due to race conditions or transient network issues
+            # Note: This only catches exceptions during session creation (lines 391-400),
+            # NOT exceptions from query execution (which happen after the yield above)
             logger.error(
                 f"Spark Connect session creation failed for {username}, "
                 f"falling back to shared cluster: {type(e).__name__}: {e}",
