@@ -415,19 +415,30 @@ class TestIsSparkConnectReachable:
     """Tests for the is_spark_connect_reachable function."""
 
     def test_reachable_returns_true(self):
-        """Test that reachable host returns True."""
-        with patch("socket.socket") as mock_socket_class:
+        """Test that reachable host returns True when both TCP and gRPC checks pass."""
+        with (
+            patch("socket.socket") as mock_socket_class,
+            patch("src.service.dependencies.grpc") as mock_grpc,
+        ):
+            # Mock TCP check to pass
             mock_socket = MagicMock()
             mock_socket.connect_ex.return_value = 0  # Success
             mock_socket_class.return_value = mock_socket
+
+            # Mock gRPC check to pass
+            mock_channel = MagicMock()
+            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_future = MagicMock()
+            mock_grpc.channel_ready_future.return_value = mock_future
 
             result = is_spark_connect_reachable("sc://localhost:15002")
 
         assert result is True
         mock_socket.close.assert_called_once()
+        mock_channel.close.assert_called_once()
 
     def test_unreachable_returns_false(self):
-        """Test that unreachable host returns False."""
+        """Test that unreachable host returns False (TCP check fails)."""
         with patch("socket.socket") as mock_socket_class:
             mock_socket = MagicMock()
             mock_socket.connect_ex.return_value = 111  # Connection refused
@@ -450,6 +461,56 @@ class TestIsSparkConnectReachable:
         """Test that invalid URL returns False."""
         result = is_spark_connect_reachable("invalid-url")
         assert result is False
+
+    def test_grpc_timeout_returns_false(self):
+        """Test that gRPC timeout returns False even if TCP check passes."""
+        import grpc
+
+        with (
+            patch("socket.socket") as mock_socket_class,
+            patch("src.service.dependencies.grpc") as mock_grpc,
+        ):
+            # Mock TCP check to pass
+            mock_socket = MagicMock()
+            mock_socket.connect_ex.return_value = 0
+            mock_socket_class.return_value = mock_socket
+
+            # Mock gRPC to timeout - use real exception class
+            mock_channel = MagicMock()
+            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_future = MagicMock()
+            mock_future.result.side_effect = grpc.FutureTimeoutError()
+            mock_grpc.channel_ready_future.return_value = mock_future
+            # Also need to set up the exception class on the mock for isinstance check
+            mock_grpc.FutureTimeoutError = grpc.FutureTimeoutError
+
+            result = is_spark_connect_reachable("sc://localhost:15002")
+
+        assert result is False
+        mock_channel.close.assert_called_once()
+
+    def test_grpc_error_returns_false(self):
+        """Test that gRPC error returns False even if TCP check passes."""
+        with (
+            patch("socket.socket") as mock_socket_class,
+            patch("src.service.dependencies.grpc") as mock_grpc,
+        ):
+            # Mock TCP check to pass
+            mock_socket = MagicMock()
+            mock_socket.connect_ex.return_value = 0
+            mock_socket_class.return_value = mock_socket
+
+            # Mock gRPC to fail with error
+            mock_channel = MagicMock()
+            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_future = MagicMock()
+            mock_future.result.side_effect = Exception("gRPC connection failed")
+            mock_grpc.channel_ready_future.return_value = mock_future
+
+            result = is_spark_connect_reachable("sc://localhost:15002")
+
+        assert result is False
+        mock_channel.close.assert_called_once()
 
     def test_custom_timeout(self):
         """Test that custom timeout is used for gRPC check (TCP uses fixed 0.5s)."""
@@ -482,10 +543,18 @@ class TestIsSparkConnectReachable:
 
     def test_default_port_used_when_missing(self):
         """Test that default port 15002 is used when not specified."""
-        with patch("socket.socket") as mock_socket_class:
+        with (
+            patch("socket.socket") as mock_socket_class,
+            patch("src.service.dependencies.grpc") as mock_grpc,
+        ):
             mock_socket = MagicMock()
             mock_socket.connect_ex.return_value = 0
             mock_socket_class.return_value = mock_socket
+
+            mock_channel = MagicMock()
+            mock_grpc.insecure_channel.return_value = mock_channel
+            mock_future = MagicMock()
+            mock_grpc.channel_ready_future.return_value = mock_future
 
             is_spark_connect_reachable("sc://localhost")
 
