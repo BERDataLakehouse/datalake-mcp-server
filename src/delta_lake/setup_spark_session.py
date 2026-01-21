@@ -10,6 +10,7 @@ MAINTENANCE NOTE: This file is copied from:
 When updating, copy the file and adapt the imports and warehouse configuration.
 """
 
+import contextlib
 import logging
 import os
 import re
@@ -30,11 +31,15 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # THREAD SAFETY
 # =============================================================================
-# Global lock to prevent race conditions during Spark session creation.
+# Lock for Standalone mode session creation only.
 # PySpark's SparkSession.builder.getOrCreate() is NOT thread-safe and manipulates
 # global state (environment variables, builder._options). Without this lock,
 # concurrent requests can cause undefined behavior and deadlocks.
-_spark_session_lock = threading.Lock()
+#
+# NOTE: Spark Connect mode does NOT need this lock because Connect sessions
+# are client-only gRPC connections that don't share JVM state. Each Connect
+# session can be created concurrently without conflicts.
+_standalone_session_lock = threading.Lock()
 
 # Suppress Protobuf version warnings from PySpark Spark Connect
 warnings.filterwarnings(
@@ -480,7 +485,7 @@ def get_spark_session(
         config.update(override)
 
     # ==========================================================================
-    # CRITICAL: Thread-safe session creation
+    # CRITICAL: Thread-safe session creation (Standalone mode only)
     # ==========================================================================
     # PySpark's SparkSession.builder is NOT thread-safe. The following operations
     # must be performed atomically to prevent race conditions:
@@ -489,25 +494,31 @@ def get_spark_session(
     # 2. Clearing builder._options
     # 3. Creating SparkConf and calling getOrCreate()
     #
-    # Without this lock, concurrent requests can cause:
+    # For Spark Connect mode: No lock needed - Connect sessions are client-only
+    # gRPC connections that don't share JVM builder state. Each Connect session
+    # can be created concurrently without conflicts.
+    #
+    # For Standalone mode: Lock required - sessions share the same JVM and
+    # builder state. Without this lock, concurrent requests can cause:
     # - Environment variable corruption between threads
     # - Builder options being modified mid-creation
     # - Undefined behavior leading to service hangs
     # ==========================================================================
-    with _spark_session_lock:
-        logger.info("Acquired Spark session creation lock")
+
+    # Use nullcontext for Spark Connect (no lock), real lock for Standalone
+    session_lock = (
+        contextlib.nullcontext() if use_spark_connect else _standalone_session_lock
+    )
+
+    with session_lock:
+        if not use_spark_connect:
+            logger.info("Acquired Standalone session creation lock")
+        else:
+            logger.debug("Spark Connect mode - no lock required")
 
         # Clean environment before creating session
         # PySpark 3.4+ uses environment variables to determine mode
         _clear_spark_env_for_mode_switch(use_spark_connect)
-
-        # ==========================================================================
-        # NOTE: Mode conflict resolution is handled at the request level in
-        # dependencies.py via _session_mode_lock. This lock serializes ALL session
-        # creation (both Connect and Standalone) to prevent the JVM from having
-        # conflicting session types. Standalone requests hold the mode lock for
-        # their entire lifecycle, ensuring mode switches only happen after cleanup.
-        # ==========================================================================
 
         # Clear builder's cached options to prevent conflicts
         builder = SparkSession.builder
@@ -521,7 +532,8 @@ def get_spark_session(
         # Use the same builder instance that we cleared
         spark = builder.config(conf=spark_conf).getOrCreate()
 
-        logger.info("Spark session creation complete, releasing lock")
+        if not use_spark_connect:
+            logger.info("Standalone session creation complete, releasing lock")
 
     # Post-creation configuration (only for legacy mode with SparkContext)
     # This can be done outside the lock as it operates on the session instance

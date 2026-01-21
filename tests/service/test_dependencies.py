@@ -926,21 +926,21 @@ class TestConcurrentSparkSessions:
                         except StopIteration:
                             pass
 
-    def test_mixed_mode_requests_serialize_during_creation(
+    def test_mixed_mode_requests_run_concurrently(
         self, mock_request, mock_settings, concurrent_executor
     ):
-        """Test that mixed Connect/Standalone requests serialize session creation.
+        """Test that mixed Connect/Standalone requests can run concurrently.
 
-        When both Connect and Standalone requests happen concurrently,
-        session creation should be serialized to prevent mode conflicts.
+        With the new architecture:
+        - Spark Connect mode: Fully concurrent (no locking), each is a gRPC client
+        - Standalone mode: Process-isolated via ProcessPoolExecutor
 
-        Note: Patches are applied OUTSIDE the threads to avoid race conditions
-        where each thread's patch context interferes with others.
+        This test verifies that concurrent requests complete successfully.
         """
         import threading
         import time
 
-        creation_tracking = {"in_use": False, "conflicts": 0, "created": 0}
+        creation_tracking = {"created": 0}
         tracking_lock = threading.Lock()
 
         # Track which user index requested which mode
@@ -948,17 +948,11 @@ class TestConcurrentSparkSessions:
         mode_lock = threading.Lock()
 
         def mock_create(*args, **kwargs):
-            """Track if another creation is in progress."""
+            """Track session creation."""
             with tracking_lock:
-                if creation_tracking["in_use"]:
-                    creation_tracking["conflicts"] += 1
-                creation_tracking["in_use"] = True
                 creation_tracking["created"] += 1
 
-            time.sleep(0.02)  # Small delay to expose race conditions
-
-            with tracking_lock:
-                creation_tracking["in_use"] = False
+            time.sleep(0.02)  # Small delay to simulate work
             return MagicMock()
 
         def get_user_mock(request):
@@ -1024,11 +1018,6 @@ class TestConcurrentSparkSessions:
         assert sorted(results) == [0, 1, 2, 3]
         # All sessions should have been created
         assert creation_tracking["created"] == 4
-        # No conflicts should occur (lock should serialize creation)
-        assert creation_tracking["conflicts"] == 0, (
-            f"Expected 0 conflicts but got {creation_tracking['conflicts']}. "
-            "This indicates the lock is not properly serializing session creation."
-        )
 
 
 # =============================================================================
