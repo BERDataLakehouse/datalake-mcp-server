@@ -164,7 +164,7 @@ class TestShutdownPool:
         import src.service.spark_session_pool as pool_module
 
         # Create a pool
-        pool = _get_pool()
+        _get_pool()
         assert pool_module._spark_process_pool is not None
 
         # Shutdown
@@ -330,7 +330,7 @@ class TestGetPoolStatus:
         # Create a fresh pool
         original_pool = pool_module._spark_process_pool
         pool_module._spark_process_pool = None
-        pool = _get_pool()
+        _get_pool()
 
         try:
             # Pool should not be in shutdown state
