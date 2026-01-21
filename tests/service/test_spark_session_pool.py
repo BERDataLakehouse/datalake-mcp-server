@@ -10,12 +10,17 @@ Tests cover:
 - Pool status reporting
 """
 
+import concurrent.futures
+import importlib
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import src.service.spark_session_pool as pool_module
+from src.service.exceptions import SparkTimeoutError
 from src.service.spark_session_pool import (
     STANDALONE_POOL_SIZE,
     STANDALONE_POOL_TIMEOUT,
@@ -24,7 +29,6 @@ from src.service.spark_session_pool import (
     get_pool_status,
     run_in_spark_process,
 )
-from src.service.exceptions import SparkTimeoutError
 
 
 # =============================================================================
@@ -56,8 +60,6 @@ def _raising_function(message: str) -> None:
 
 def _get_process_id() -> int:
     """Return current process ID to verify isolation."""
-    import os
-
     return os.getpid()
 
 
@@ -84,9 +86,6 @@ class TestConstants:
         """Test pool size can be configured via environment variable."""
         with patch.dict("os.environ", {"STANDALONE_SPARK_POOL_SIZE": "8"}):
             # Re-import to get new value
-            import importlib
-            import src.service.spark_session_pool as pool_module
-
             importlib.reload(pool_module)
             assert pool_module.STANDALONE_POOL_SIZE == 8
 
@@ -96,9 +95,6 @@ class TestConstants:
     def test_pool_timeout_from_env(self):
         """Test timeout can be configured via environment variable."""
         with patch.dict("os.environ", {"STANDALONE_POOL_TIMEOUT": "120.5"}):
-            import importlib
-            import src.service.spark_session_pool as pool_module
-
             importlib.reload(pool_module)
             assert pool_module.STANDALONE_POOL_TIMEOUT == 120.5
 
@@ -121,8 +117,6 @@ class TestGetPool:
 
     def test_lazy_initialization(self):
         """Test that pool is lazily initialized."""
-        import src.service.spark_session_pool as pool_module
-
         # Reset pool state
         original_pool = pool_module._spark_process_pool
         pool_module._spark_process_pool = None
@@ -161,8 +155,6 @@ class TestShutdownPool:
 
     def test_shutdown_when_pool_exists(self):
         """Test shutting down an existing pool."""
-        import src.service.spark_session_pool as pool_module
-
         # Create a pool
         _get_pool()
         assert pool_module._spark_process_pool is not None
@@ -175,8 +167,6 @@ class TestShutdownPool:
 
     def test_shutdown_when_pool_is_none(self):
         """Test shutdown when pool was never created."""
-        import src.service.spark_session_pool as pool_module
-
         original_pool = pool_module._spark_process_pool
         pool_module._spark_process_pool = None
 
@@ -189,8 +179,6 @@ class TestShutdownPool:
 
     def test_shutdown_handles_exceptions_gracefully(self):
         """Test that shutdown handles exceptions during pool.shutdown()."""
-        import src.service.spark_session_pool as pool_module
-
         # Create a mock pool that raises on shutdown
         mock_pool = MagicMock()
         mock_pool.shutdown.side_effect = Exception("Shutdown error")
@@ -265,8 +253,6 @@ class TestRunInSparkProcess:
 
     def test_runs_in_separate_process(self):
         """Test that function runs in a different process."""
-        import os
-
         current_pid = os.getpid()
         worker_pid = run_in_spark_process(_get_process_id, operation_name="pid_test")
 
@@ -296,8 +282,6 @@ class TestGetPoolStatus:
 
     def test_status_when_pool_not_initialized(self):
         """Test status when pool has not been created yet."""
-        import src.service.spark_session_pool as pool_module
-
         original_pool = pool_module._spark_process_pool
         pool_module._spark_process_pool = None
 
@@ -325,8 +309,6 @@ class TestGetPoolStatus:
 
     def test_status_shows_shutdown_state(self):
         """Test that status reflects shutdown state."""
-        import src.service.spark_session_pool as pool_module
-
         # Create a fresh pool
         original_pool = pool_module._spark_process_pool
         pool_module._spark_process_pool = None
@@ -350,8 +332,6 @@ class TestConcurrentExecution:
 
     def test_multiple_concurrent_submissions(self):
         """Test that multiple functions can run concurrently."""
-        import concurrent.futures
-
         # Submit multiple tasks
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
@@ -373,8 +353,6 @@ class TestConcurrentExecution:
 
     def test_process_isolation(self):
         """Test that each task runs in a separate process."""
-        import concurrent.futures
-
         # Get PIDs from multiple concurrent tasks
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
@@ -385,7 +363,5 @@ class TestConcurrentExecution:
 
         # All PIDs should be from worker processes (may or may not be unique
         # depending on pool reuse, but all should be different from main process)
-        import os
-
         main_pid = os.getpid()
         assert all(pid != main_pid for pid in pids)
