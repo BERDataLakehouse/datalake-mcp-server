@@ -5,6 +5,7 @@ Dependencies for FastAPI dependency injection.
 import json
 import logging
 import os
+import random
 import re
 import socket
 from datetime import datetime
@@ -440,10 +441,20 @@ def get_spark_session(
             f"(pool size: {STANDALONE_POOL_SIZE})"
         )
 
-        # Use shared cluster master URL
-        shared_master_url = os.getenv(
+        # Use shared cluster master URL(s) - supports comma-separated list for load balancing
+        # Example: "spark://master1:7077,spark://master2:7077,spark://master3:7077"
+        master_urls_env = os.getenv(
             "SHARED_SPARK_MASTER_URL",
             "spark://sharedsparkclustermaster.prod:7077",
+        )
+        # Parse comma-separated list and randomly select one for load balancing
+        master_urls = [url.strip() for url in master_urls_env.split(",") if url.strip()]
+        if not master_urls:
+            master_urls = ["spark://sharedsparkclustermaster.prod:7077"]
+
+        shared_master_url = random.choice(master_urls)
+        logger.debug(
+            f"Selected Spark master: {shared_master_url} (from {len(master_urls)} available)"
         )
 
         # Create fallback settings dict for the subprocess
