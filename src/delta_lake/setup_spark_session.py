@@ -367,6 +367,60 @@ def _clear_spark_env_for_mode_switch(use_spark_connect: bool) -> None:
             del os.environ[var]
 
 
+def _clear_stale_spark_connect_sessions() -> None:
+    """
+    Clear cached Spark Connect sessions to prevent INVALID_HANDLE.SESSION_CLOSED errors.
+
+    When a Spark Connect server restarts or a session times out, the client-side
+    cached session handle becomes stale. PySpark's getOrCreate() checks for cached
+    sessions first (via _active_session and _default_session), and if found, tries
+    to reuse them. When the handle is stale, this causes:
+
+        [INVALID_HANDLE.SESSION_CLOSED] The handle ... is invalid. Session was closed.
+
+    This function clears the thread-local _active_session and global _default_session
+    to force getOrCreate() to create a fresh session via builder.create().
+
+    This is safe for Spark Connect mode because:
+    1. Connect sessions are client-side gRPC connections (no JVM state)
+    2. Each Connect session has its own session_id on the server
+    3. Clearing the cache just means we'll create a new session_id
+
+    This is NOT needed for Standalone mode where sessions share JVM state.
+    """
+    try:
+        # Import Spark Connect session class
+        from pyspark.sql.connect.session import SparkSession as RemoteSparkSession
+
+        with RemoteSparkSession._lock:
+            # Clear thread-local active session
+            if hasattr(RemoteSparkSession._active_session, "session"):
+                old_session = getattr(
+                    RemoteSparkSession._active_session, "session", None
+                )
+                if old_session is not None:
+                    logger.info(
+                        f"Clearing stale Spark Connect active session: "
+                        f"session_id={getattr(old_session, 'session_id', 'unknown')}"
+                    )
+                    RemoteSparkSession._active_session.session = None
+
+            # Clear global default session
+            if RemoteSparkSession._default_session is not None:
+                logger.info(
+                    f"Clearing stale Spark Connect default session: "
+                    f"session_id={getattr(RemoteSparkSession._default_session, 'session_id', 'unknown')}"
+                )
+                RemoteSparkSession._default_session = None
+
+    except ImportError:
+        # Spark Connect not available - nothing to clear
+        logger.debug("Spark Connect not available, skipping session cache clear")
+    except Exception as e:
+        # Don't fail the session creation just because cache clearing failed
+        logger.warning(f"Failed to clear stale Spark Connect sessions: {e}")
+
+
 def generate_spark_conf(
     app_name: str | None = None,
     local: bool = False,
@@ -519,6 +573,11 @@ def get_spark_session(
         # Clean environment before creating session
         # PySpark 3.4+ uses environment variables to determine mode
         _clear_spark_env_for_mode_switch(use_spark_connect)
+
+        # For Spark Connect: clear any stale cached sessions to prevent
+        # INVALID_HANDLE.SESSION_CLOSED errors when server has restarted
+        if use_spark_connect:
+            _clear_stale_spark_connect_sessions()
 
         # Clear builder's cached options to prevent conflicts
         builder = SparkSession.builder
