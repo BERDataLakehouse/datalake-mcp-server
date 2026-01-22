@@ -37,7 +37,7 @@ from src.delta_lake.setup_spark_session import (
     EXECUTOR_MEMORY_OVERHEAD,
     DRIVER_MEMORY_OVERHEAD,
     IMMUTABLE_CONFIGS,
-    _spark_session_lock,
+    _standalone_session_lock,
 )
 from src.settings import BERDLSettings
 
@@ -905,12 +905,12 @@ class TestGetSparkSession:
 
 
 class TestThreadSafety:
-    """Tests for thread safety of Spark session creation."""
+    """Tests for thread safety of Spark session creation (Standalone mode)."""
 
-    def test_spark_session_lock_exists(self):
-        """Test that the global lock exists."""
-        assert _spark_session_lock is not None
-        assert isinstance(_spark_session_lock, type(threading.Lock()))
+    def test_standalone_session_lock_exists(self):
+        """Test that the Standalone mode lock exists."""
+        assert _standalone_session_lock is not None
+        assert isinstance(_standalone_session_lock, type(threading.Lock()))
 
     def test_concurrent_session_creation_uses_lock(self, test_settings):
         """Test that concurrent session creation uses the lock."""

@@ -1,14 +1,29 @@
 """
 API routes for Delta Lake operations.
+
+Routes support full concurrency:
+- Spark Connect mode: Direct SparkSession usage
+- Standalone mode: Dispatched to ProcessPoolExecutor for isolated execution
 """
 
 import logging
-from typing import Any, Dict, List, Optional, cast
+from typing import Annotated, Any, Dict, List, Optional, cast
 
 from fastapi import APIRouter, Depends, Request, status
 
 from src.delta_lake import data_store, delta_service
-from src.service.dependencies import auth, get_spark_session
+from src.service.dependencies import SparkContext, auth, get_spark_context
+from src.service.spark_session_pool import run_in_spark_process
+from src.service.standalone_operations import (
+    count_table_subprocess,
+    get_db_structure_subprocess,
+    get_table_schema_subprocess,
+    list_databases_subprocess,
+    list_tables_subprocess,
+    query_table_subprocess,
+    sample_table_subprocess,
+    select_table_subprocess,
+)
 from src.settings import get_settings
 from src.service.models import (
     DatabaseListRequest,
@@ -52,7 +67,7 @@ def _extract_token_from_request(request: Request) -> Optional[str]:
 def list_databases(
     body: DatabaseListRequest,
     http_request: Request,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseListResponse:
     """
@@ -66,16 +81,29 @@ def list_databases(
         if not auth_token:
             raise ValueError("Authorization token required for namespace filtering")
 
-    databases = cast(
-        list[str],
-        data_store.get_databases(
-            spark=spark,
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        databases = run_in_spark_process(
+            list_databases_subprocess,
+            ctx.settings_dict,
             use_hms=body.use_hms,
-            return_json=False,
             filter_by_namespace=body.filter_by_namespace,
             auth_token=auth_token,
-        ),
-    )
+            app_name=ctx.app_name,
+            operation_name="list_databases",
+        )
+    else:
+        # Use Spark Connect session directly
+        databases = cast(
+            list[str],
+            data_store.get_databases(
+                spark=ctx.spark,
+                use_hms=body.use_hms,
+                return_json=False,
+                filter_by_namespace=body.filter_by_namespace,
+                auth_token=auth_token,
+            ),
+        )
 
     return DatabaseListResponse(databases=databases)
 
@@ -90,23 +118,35 @@ def list_databases(
 )
 def list_database_tables(
     request: TableListRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableListResponse:
     """
     Endpoint to list tables in a specific database.
     """
-    settings = get_settings()
-    tables = cast(
-        list[str],
-        data_store.get_tables(
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        tables = run_in_spark_process(
+            list_tables_subprocess,
+            ctx.settings_dict,
             database=request.database,
-            spark=spark,
             use_hms=request.use_hms,
-            return_json=False,
-            settings=settings,
-        ),
-    )
+            app_name=ctx.app_name,
+            operation_name="list_tables",
+        )
+    else:
+        # Use Spark Connect session directly
+        settings = get_settings()
+        tables = cast(
+            list[str],
+            data_store.get_tables(
+                database=request.database,
+                spark=ctx.spark,
+                use_hms=request.use_hms,
+                return_json=False,
+                settings=settings,
+            ),
+        )
     return TableListResponse(tables=tables)
 
 
@@ -120,21 +160,33 @@ def list_database_tables(
 )
 def get_table_schema(
     request: TableSchemaRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableSchemaResponse:
     """
     Endpoint to get the schema of a specific table in a database.
     """
-    columns = cast(
-        list[str],
-        data_store.get_table_schema(
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        columns = run_in_spark_process(
+            get_table_schema_subprocess,
+            ctx.settings_dict,
             database=request.database,
             table=request.table,
-            spark=spark,
-            return_json=False,
-        ),
-    )
+            app_name=ctx.app_name,
+            operation_name="get_table_schema",
+        )
+    else:
+        # Use Spark Connect session directly
+        columns = cast(
+            list[str],
+            data_store.get_table_schema(
+                database=request.database,
+                table=request.table,
+                spark=ctx.spark,
+                return_json=False,
+            ),
+        )
     return TableSchemaResponse(columns=columns)
 
 
@@ -148,23 +200,35 @@ def get_table_schema(
 )
 def get_database_structure(
     request: DatabaseStructureRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseStructureResponse:
     """
     Endpoint to get the complete structure of all databases.
     """
-    settings = get_settings()
-    structure = cast(
-        dict[str, list[str] | dict[str, list[str]]],
-        data_store.get_db_structure(
-            spark=spark,
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        structure = run_in_spark_process(
+            get_db_structure_subprocess,
+            ctx.settings_dict,
             with_schema=request.with_schema,
             use_hms=request.use_hms,
-            return_json=False,
-            settings=settings,
-        ),
-    )
+            app_name=ctx.app_name,
+            operation_name="get_db_structure",
+        )
+    else:
+        # Use Spark Connect session directly
+        settings = get_settings()
+        structure = cast(
+            dict[str, list[str] | dict[str, list[str]]],
+            data_store.get_db_structure(
+                spark=ctx.spark,
+                with_schema=request.with_schema,
+                use_hms=request.use_hms,
+                return_json=False,
+                settings=settings,
+            ),
+        )
     return DatabaseStructureResponse(structure=structure)
 
 
@@ -178,7 +242,7 @@ def get_database_structure(
 )
 def count_table(
     request: TableCountRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableCountResponse:
     """
@@ -187,9 +251,25 @@ def count_table(
     # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
 
-    count = delta_service.count_delta_table(
-        spark=spark, database=request.database, table=request.table, username=username
-    )
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        count = run_in_spark_process(
+            count_table_subprocess,
+            ctx.settings_dict,
+            database=request.database,
+            table=request.table,
+            username=username,
+            app_name=ctx.app_name,
+            operation_name="count_table",
+        )
+    else:
+        # Use Spark Connect session directly
+        count = delta_service.count_delta_table(
+            spark=ctx.spark,
+            database=request.database,
+            table=request.table,
+            username=username,
+        )
     return TableCountResponse(count=count)
 
 
@@ -203,7 +283,7 @@ def count_table(
 )
 def sample_table(
     request: TableSampleRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableSampleResponse:
     """
@@ -212,15 +292,31 @@ def sample_table(
     # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
 
-    sample: List[Dict[str, Any]] = delta_service.sample_delta_table(
-        spark=spark,
-        database=request.database,
-        table=request.table,
-        limit=request.limit,
-        columns=request.columns,
-        where_clause=request.where_clause,
-        username=username,
-    )
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        sample = run_in_spark_process(
+            sample_table_subprocess,
+            ctx.settings_dict,
+            database=request.database,
+            table=request.table,
+            limit=request.limit,
+            columns=request.columns,
+            where_clause=request.where_clause,
+            username=username,
+            app_name=ctx.app_name,
+            operation_name="sample_table",
+        )
+    else:
+        # Use Spark Connect session directly
+        sample: List[Dict[str, Any]] = delta_service.sample_delta_table(
+            spark=ctx.spark,
+            database=request.database,
+            table=request.table,
+            limit=request.limit,
+            columns=request.columns,
+            where_clause=request.where_clause,
+            username=username,
+        )
     return TableSampleResponse(sample=sample)
 
 
@@ -241,7 +337,7 @@ def sample_table(
 )
 def query_table(
     request: TableQueryRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableQueryResponse:
     """
@@ -250,13 +346,34 @@ def query_table(
     # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
 
-    return delta_service.query_delta_table(
-        spark=spark,
-        query=request.query,
-        limit=request.limit,
-        offset=request.offset,
-        username=username,
-    )
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        result = run_in_spark_process(
+            query_table_subprocess,
+            ctx.settings_dict,
+            query=request.query,
+            limit=request.limit,
+            offset=request.offset,
+            username=username,
+            app_name=ctx.app_name,
+            operation_name="query_table",
+        )
+        # Result is a dict, need to convert back to response model
+        from src.service.models import PaginationInfo
+
+        return TableQueryResponse(
+            result=result["result"],
+            pagination=PaginationInfo(**result["pagination"]),
+        )
+    else:
+        # Use Spark Connect session directly
+        return delta_service.query_delta_table(
+            spark=ctx.spark,
+            query=request.query,
+            limit=request.limit,
+            offset=request.offset,
+            username=username,
+        )
 
 
 @router.post(
@@ -274,7 +391,7 @@ def query_table(
 )
 def select_table(
     request: TableSelectRequest,
-    spark=Depends(get_spark_session),
+    ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableSelectResponse:
     """
@@ -287,6 +404,29 @@ def select_table(
     # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
 
-    return delta_service.select_from_delta_table(
-        spark=spark, request=request, username=username
-    )
+    if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
+        # Convert request to dict for pickling
+        request_dict = request.model_dump()
+        result = run_in_spark_process(
+            select_table_subprocess,
+            ctx.settings_dict,
+            request_dict=request_dict,
+            username=username,
+            app_name=ctx.app_name,
+            operation_name="select_table",
+        )
+        # Result is a dict, need to convert back to response model
+        from src.service.models import PaginationInfo
+
+        return TableSelectResponse(
+            data=result["data"],
+            pagination=PaginationInfo(**result["pagination"]),
+        )
+    else:
+        # Use Spark Connect session directly
+        return delta_service.select_from_delta_table(
+            spark=ctx.spark,
+            request=request,
+            username=username,
+        )

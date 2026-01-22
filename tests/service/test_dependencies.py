@@ -926,21 +926,21 @@ class TestConcurrentSparkSessions:
                         except StopIteration:
                             pass
 
-    def test_mixed_mode_requests_serialize_during_creation(
+    def test_mixed_mode_requests_run_concurrently(
         self, mock_request, mock_settings, concurrent_executor
     ):
-        """Test that mixed Connect/Standalone requests serialize session creation.
+        """Test that mixed Connect/Standalone requests can run concurrently.
 
-        When both Connect and Standalone requests happen concurrently,
-        session creation should be serialized to prevent mode conflicts.
+        With the new architecture:
+        - Spark Connect mode: Fully concurrent (no locking), each is a gRPC client
+        - Standalone mode: Process-isolated via ProcessPoolExecutor
 
-        Note: Patches are applied OUTSIDE the threads to avoid race conditions
-        where each thread's patch context interferes with others.
+        This test verifies that concurrent requests complete successfully.
         """
         import threading
         import time
 
-        creation_tracking = {"in_use": False, "conflicts": 0, "created": 0}
+        creation_tracking = {"created": 0}
         tracking_lock = threading.Lock()
 
         # Track which user index requested which mode
@@ -948,17 +948,11 @@ class TestConcurrentSparkSessions:
         mode_lock = threading.Lock()
 
         def mock_create(*args, **kwargs):
-            """Track if another creation is in progress."""
+            """Track session creation."""
             with tracking_lock:
-                if creation_tracking["in_use"]:
-                    creation_tracking["conflicts"] += 1
-                creation_tracking["in_use"] = True
                 creation_tracking["created"] += 1
 
-            time.sleep(0.02)  # Small delay to expose race conditions
-
-            with tracking_lock:
-                creation_tracking["in_use"] = False
+            time.sleep(0.02)  # Small delay to simulate work
             return MagicMock()
 
         def get_user_mock(request):
@@ -1024,11 +1018,6 @@ class TestConcurrentSparkSessions:
         assert sorted(results) == [0, 1, 2, 3]
         # All sessions should have been created
         assert creation_tracking["created"] == 4
-        # No conflicts should occur (lock should serialize creation)
-        assert creation_tracking["conflicts"] == 0, (
-            f"Expected 0 conflicts but got {creation_tracking['conflicts']}. "
-            "This indicates the lock is not properly serializing session creation."
-        )
 
 
 # =============================================================================
@@ -1046,3 +1035,98 @@ class TestConstants:
     def test_spark_connect_port_value(self):
         """Test SPARK_CONNECT_PORT constant."""
         assert SPARK_CONNECT_PORT == "15002"
+
+
+# =============================================================================
+# Token Extraction Tests
+# =============================================================================
+
+
+class TestGetTokenFromRequest:
+    """Tests for the get_token_from_request function."""
+
+    def test_extracts_bearer_token(self):
+        """Test successful extraction of Bearer token."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer test-token-123"
+
+        token = get_token_from_request(request)
+
+        assert token == "test-token-123"
+
+    def test_returns_none_for_missing_header(self):
+        """Test that missing Authorization header returns None."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = ""
+
+        token = get_token_from_request(request)
+
+        assert token is None
+
+    def test_returns_none_for_non_bearer_auth(self):
+        """Test that non-Bearer auth returns None."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = "Basic dXNlcjpwYXNz"
+
+        token = get_token_from_request(request)
+
+        assert token is None
+
+
+# =============================================================================
+# SparkContext Dataclass Tests
+# =============================================================================
+
+
+class TestSparkContextDataclass:
+    """Tests for the SparkContext dataclass."""
+
+    def test_default_values(self):
+        """Test SparkContext with default values."""
+        from src.service.dependencies import SparkContext
+
+        ctx = SparkContext()
+
+        assert ctx.spark is None
+        assert ctx.is_standalone_subprocess is False
+        assert ctx.settings_dict == {}
+        assert ctx.app_name == ""
+        assert ctx.username == ""
+        assert ctx.auth_token is None
+
+    def test_custom_values(self):
+        """Test SparkContext with custom values."""
+        from src.service.dependencies import SparkContext
+
+        mock_spark = MagicMock()
+        ctx = SparkContext(
+            spark=mock_spark,
+            is_standalone_subprocess=True,
+            settings_dict={"USER": "testuser"},
+            app_name="mcp_query",
+            username="testuser",
+            auth_token="token123",
+        )
+
+        assert ctx.spark == mock_spark
+        assert ctx.is_standalone_subprocess is True
+        assert ctx.settings_dict == {"USER": "testuser"}
+        assert ctx.app_name == "mcp_query"
+        assert ctx.username == "testuser"
+        assert ctx.auth_token == "token123"
+
+
+# =============================================================================
+# get_spark_context Tests
+# =============================================================================
+
+# Note: Testing get_spark_context requires complex fixture setup since it depends
+# on read_user_minio_credentials reading from filesystem. The function is exercised
+# by the route integration tests in test_delta.py which mock the dependency at
+# the route level. Additional unit tests for get_spark_context are deferred.
