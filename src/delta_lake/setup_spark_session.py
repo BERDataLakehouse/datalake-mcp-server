@@ -22,6 +22,7 @@ from typing import Any
 
 from pyspark.conf import SparkConf
 from pyspark.sql import SparkSession
+from pyspark.sql.connect.session import SparkSession as RemoteSparkSession
 
 from src.settings import BERDLSettings, get_settings
 
@@ -389,9 +390,6 @@ def _clear_stale_spark_connect_sessions() -> None:
     This is NOT needed for Standalone mode where sessions share JVM state.
     """
     try:
-        # Import Spark Connect session class
-        from pyspark.sql.connect.session import SparkSession as RemoteSparkSession
-
         with RemoteSparkSession._lock:
             # Clear thread-local active session
             if hasattr(RemoteSparkSession._active_session, "session"):
@@ -413,9 +411,6 @@ def _clear_stale_spark_connect_sessions() -> None:
                 )
                 RemoteSparkSession._default_session = None
 
-    except ImportError:
-        # Spark Connect not available - nothing to clear
-        logger.debug("Spark Connect not available, skipping session cache clear")
     except Exception as e:
         # Don't fail the session creation just because cache clearing failed
         logger.warning(f"Failed to clear stale Spark Connect sessions: {e}")
