@@ -8,7 +8,7 @@ Tests cover:
 - All subprocess operation wrappers (count, sample, query, select, list_databases, etc.)
 """
 
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import AnyUrl
