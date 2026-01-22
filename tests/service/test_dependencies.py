@@ -1035,3 +1035,98 @@ class TestConstants:
     def test_spark_connect_port_value(self):
         """Test SPARK_CONNECT_PORT constant."""
         assert SPARK_CONNECT_PORT == "15002"
+
+
+# =============================================================================
+# Token Extraction Tests
+# =============================================================================
+
+
+class TestGetTokenFromRequest:
+    """Tests for the get_token_from_request function."""
+
+    def test_extracts_bearer_token(self):
+        """Test successful extraction of Bearer token."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer test-token-123"
+
+        token = get_token_from_request(request)
+
+        assert token == "test-token-123"
+
+    def test_returns_none_for_missing_header(self):
+        """Test that missing Authorization header returns None."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = ""
+
+        token = get_token_from_request(request)
+
+        assert token is None
+
+    def test_returns_none_for_non_bearer_auth(self):
+        """Test that non-Bearer auth returns None."""
+        from src.service.dependencies import get_token_from_request
+
+        request = MagicMock()
+        request.headers.get.return_value = "Basic dXNlcjpwYXNz"
+
+        token = get_token_from_request(request)
+
+        assert token is None
+
+
+# =============================================================================
+# SparkContext Dataclass Tests
+# =============================================================================
+
+
+class TestSparkContextDataclass:
+    """Tests for the SparkContext dataclass."""
+
+    def test_default_values(self):
+        """Test SparkContext with default values."""
+        from src.service.dependencies import SparkContext
+
+        ctx = SparkContext()
+
+        assert ctx.spark is None
+        assert ctx.is_standalone_subprocess is False
+        assert ctx.settings_dict == {}
+        assert ctx.app_name == ""
+        assert ctx.username == ""
+        assert ctx.auth_token is None
+
+    def test_custom_values(self):
+        """Test SparkContext with custom values."""
+        from src.service.dependencies import SparkContext
+
+        mock_spark = MagicMock()
+        ctx = SparkContext(
+            spark=mock_spark,
+            is_standalone_subprocess=True,
+            settings_dict={"USER": "testuser"},
+            app_name="mcp_query",
+            username="testuser",
+            auth_token="token123",
+        )
+
+        assert ctx.spark == mock_spark
+        assert ctx.is_standalone_subprocess is True
+        assert ctx.settings_dict == {"USER": "testuser"}
+        assert ctx.app_name == "mcp_query"
+        assert ctx.username == "testuser"
+        assert ctx.auth_token == "token123"
+
+
+# =============================================================================
+# get_spark_context Tests
+# =============================================================================
+
+# Note: Testing get_spark_context requires complex fixture setup since it depends
+# on read_user_minio_credentials reading from filesystem. The function is exercised
+# by the route integration tests in test_delta.py which mock the dependency at
+# the route level. Additional unit tests for get_spark_context are deferred.

@@ -8,6 +8,7 @@ import os
 import random
 import re
 import socket
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Generator
@@ -32,6 +33,34 @@ auth = KBaseHTTPBearer()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SparkContext:
+    """
+    Execution context for Spark operations.
+
+    For Spark Connect mode:
+        - spark is set to the active SparkSession
+        - is_standalone_subprocess is False
+        - settings_dict is None
+
+    For Standalone mode:
+        - spark is None (session created in subprocess)
+        - is_standalone_subprocess is True
+        - settings_dict contains picklable settings for subprocess
+
+    Routes should check is_standalone_subprocess and either:
+    1. Use spark directly for queries (Connect mode)
+    2. Call run_in_spark_process() with the operation (Standalone mode)
+    """
+
+    spark: SparkSession | None = None
+    is_standalone_subprocess: bool = False
+    settings_dict: dict = field(default_factory=dict)
+    app_name: str = ""
+    username: str = ""
+    auth_token: str | None = None
 
 
 def sanitize_k8s_name(name: str) -> str:
@@ -158,6 +187,22 @@ def get_user_from_request(request: Request) -> str:
             "User not authenticated. Authorization header required."
         )
     return user.user
+
+
+def get_token_from_request(request: Request) -> str | None:
+    """
+    Extract the Bearer token from the request Authorization header.
+
+    Args:
+        request: FastAPI request object
+
+    Returns:
+        Token string (without 'Bearer ' prefix) or None if not present
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]  # Remove "Bearer " prefix
+    return None
 
 
 def construct_user_spark_connect_url(username: str) -> str:
@@ -287,51 +332,68 @@ def is_spark_connect_reachable(spark_connect_url: str, timeout: float = 2.0) -> 
         return False
 
 
-def get_spark_session(
+def get_spark_context(
     request: Request,
     settings: Annotated[BERDLSettings, Depends(get_settings)],
-) -> Generator[SparkSession, None, None]:
+) -> Generator[SparkContext, None, None]:
     """
-    Get a SparkSession instance configured for the authenticated user with automatic cleanup.
+    Get a SparkContext for executing Spark operations.
 
-    This function tries to connect to the user's personal Spark Connect server first.
-    If unavailable, it falls back to a shared Spark cluster. The session is created
-    fresh for each request with the user's MinIO credentials, ensuring proper isolation.
+    This function determines the execution mode and returns an appropriate context:
 
-    The session is automatically stopped after the request completes via generator cleanup.
+    For Spark Connect mode:
+        - Returns SparkContext with active SparkSession
+        - Operations execute directly via the session
+
+    For Standalone mode:
+        - Returns SparkContext with subprocess info (no session created here)
+        - Operations should be dispatched to ProcessPoolExecutor
 
     Connection Strategy:
     1. Try user's Spark Connect server (sc://jupyter-{username}:15002)
-    2. Fall back to shared Spark cluster (spark://sharedsparkclustermaster.prod:7077)
-
-    Session Mode Locking:
-    - ALL session creation is serialized via _session_mode_lock
-    - Connect: Lock held during creation only; queries run concurrently after
-    - Standalone: Lock held for entire request (creation + query + cleanup)
-    - This prevents mode conflicts (PySpark JVM only supports one session type)
+    2. Fall back to shared Spark cluster via ProcessPoolExecutor
 
     Usage in endpoints:
-        @app.get("/databases")
-        def get_databases(spark: Annotated[SparkSession, Depends(get_spark_session)]):
-            # Use spark here
-            databases = spark.sql("SHOW DATABASES").collect()
-            return {"databases": [db.databaseName for db in databases]}
-            # spark.stop() is automatically called after return
+        @app.get("/query")
+        def query_table(ctx: Annotated[SparkContext, Depends(get_spark_context)]):
+            if ctx.is_standalone_subprocess:
+                # Dispatch to process pool
+                result = run_in_spark_process(
+                    query_table_subprocess,
+                    ctx.settings_dict,
+                    query,
+                    username=ctx.username
+                )
+            else:
+                # Use Spark Connect session directly
+                result = delta_service.query_delta_table(
+                    spark=ctx.spark,
+                    query=query,
+                )
+            return result
 
     Args:
         request: FastAPI request object (used to extract authenticated user)
         settings: BERDL settings from environment variables
 
     Yields:
-        SparkSession configured for the user (either via Connect or direct cluster)
+        SparkContext with either a SparkSession (Connect) or subprocess info (Standalone)
 
     Raises:
-        Exception: If user is not authenticated or both connection methods fail
+        Exception: If user is not authenticated or credentials are missing
     """
     # Get authenticated user from request
     username = get_user_from_request(request)
 
-    logger.info(f"Creating Spark session for user: {username}")
+    # Try to get auth token for operations that need it
+    auth_token = None
+    try:
+        auth_token = get_token_from_request(request)
+    except Exception:
+        # Token not required for all operations
+        pass
+
+    logger.info(f"Creating Spark context for user: {username}")
 
     # Read user's MinIO credentials from their home directory
     try:
@@ -340,7 +402,7 @@ def get_spark_session(
     except FileNotFoundError as e:
         logger.error(f"MinIO credentials file not found for {username}: {e}")
         raise Exception(
-            f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
+            f"Cannot create Spark context: MinIO credentials file not found for user {username}. "
             f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
         )
     except Exception as e:
@@ -349,18 +411,21 @@ def get_spark_session(
             exc_info=True,
         )
         raise Exception(
-            f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+            f"Cannot create Spark context: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
         )
 
-    # Build base user-specific settings
-    base_user_settings = {
+    # Build base user-specific settings as picklable dict
+    # Note: URLs are converted to strings for pickling
+    base_user_settings_dict = {
         "USER": username,
         "MINIO_ACCESS_KEY": minio_access_key,
         "MINIO_SECRET_KEY": minio_secret_key,
         "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
         "MINIO_SECURE": settings.MINIO_SECURE,
         "SPARK_HOME": settings.SPARK_HOME,
-        "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
+        "SPARK_MASTER_URL": str(settings.SPARK_MASTER_URL)
+        if settings.SPARK_MASTER_URL
+        else None,
         "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
         "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
         "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
@@ -394,18 +459,34 @@ def get_spark_session(
         try:
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                **base_user_settings,
+                **{
+                    k: v
+                    for k, v in base_user_settings_dict.items()
+                    if k != "SPARK_MASTER_URL"
+                },
+                SPARK_MASTER_URL=AnyUrl(base_user_settings_dict["SPARK_MASTER_URL"])
+                if base_user_settings_dict.get("SPARK_MASTER_URL")
+                else None,
             )
 
+            app_name = f"datalake_mcp_server_{username}"
             spark = _get_spark_session(
-                app_name=f"datalake_mcp_server_{username}",
+                app_name=app_name,
                 settings=user_settings,
                 use_spark_connect=True,
             )
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
-            # Yield session - Connect sessions can run fully concurrently
-            yield spark
+            # Yield SparkContext with active session
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},  # Not needed for Connect mode
+                app_name=app_name,
+                username=username,
+                auth_token=auth_token,
+            )
+            yield ctx
 
             # No cleanup: Connect sessions belong to user's notebook pod
             logger.debug(
@@ -427,9 +508,10 @@ def get_spark_session(
         # =======================================================================
         # STANDALONE MODE (CONCURRENT VIA PROCESS POOL)
         # =======================================================================
-        # Each Standalone request runs in a separate process with its own JVM.
-        # This enables concurrent Standalone sessions up to STANDALONE_POOL_SIZE.
-        # The process pool handles isolation - no mode lock needed.
+        # Instead of creating a SparkSession here (which would cause JVM conflicts),
+        # we return context info for subprocess execution. The route will dispatch
+        # the operation to the ProcessPoolExecutor, where each worker creates its
+        # own isolated SparkSession.
         # =======================================================================
         reason = (
             "Spark Connect session creation failed"
@@ -437,7 +519,7 @@ def get_spark_session(
             else "Spark Connect server unreachable"
         )
         logger.info(
-            f"{reason}, using shared Spark cluster via process pool "
+            f"{reason}, returning Standalone subprocess context "
             f"(pool size: {STANDALONE_POOL_SIZE})"
         )
 
@@ -457,55 +539,148 @@ def get_spark_session(
             f"Selected Spark master: {shared_master_url} (from {len(master_urls)} available)"
         )
 
-        # Create fallback settings dict for the subprocess
-        fallback_settings_dict = base_user_settings.copy()
-        if not fallback_settings_dict.get("BERDL_POD_IP"):
-            fallback_settings_dict["BERDL_POD_IP"] = "0.0.0.0"
+        # Prepare settings dict for subprocess (all values must be picklable)
+        standalone_settings_dict = base_user_settings_dict.copy()
+        if not standalone_settings_dict.get("BERDL_POD_IP"):
+            standalone_settings_dict["BERDL_POD_IP"] = "0.0.0.0"
+        standalone_settings_dict["SPARK_MASTER_URL"] = shared_master_url
+        standalone_settings_dict["SPARK_CONNECT_URL"] = (
+            "sc://localhost:15002"  # Placeholder
+        )
 
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         app_name = f"datalake_mcp_server_{username}_{timestamp}"
 
-        # Create a simple wrapper session that proxies to the process pool
-        # We yield a "proxy" SparkSession that delegates operations to the pool
-        # For now, we create the session directly but without the global lock
-        # The process pool ensures isolation at the process level
+        # Yield SparkContext for subprocess execution - NO SESSION CREATED HERE
+        ctx = SparkContext(
+            spark=None,  # No session in main process
+            is_standalone_subprocess=True,
+            settings_dict=standalone_settings_dict,
+            app_name=app_name,
+            username=username,
+            auth_token=auth_token,
+        )
+        yield ctx
+        # No cleanup needed - subprocess handles its own session lifecycle
 
-        # Note: Full process pool delegation requires route refactoring.
-        # For this initial implementation, we remove the mode lock and rely on
-        # the per-process lock in setup_spark_session.py for Standalone mode.
-        # True process isolation will be added in a follow-up change.
 
-        fallback_settings_dict["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
-        fallback_settings_dict["SPARK_CONNECT_URL"] = AnyUrl("sc://localhost:15002")
+# Keep get_spark_session for backward compatibility with existing routes
+def get_spark_session(
+    request: Request,
+    settings: Annotated[BERDLSettings, Depends(get_settings)],
+) -> Generator[SparkSession, None, None]:
+    """
+    [DEPRECATED] Get a SparkSession instance.
 
-        fallback_settings = BERDLSettings(**fallback_settings_dict)
+    This function is maintained for backward compatibility with routes that
+    haven't been migrated to use get_spark_context yet.
+
+    WARNING: This function creates a SparkSession in the main process for
+    Standalone mode, which limits concurrency. New routes should use
+    get_spark_context instead.
+
+    Args:
+        request: FastAPI request object (used to extract authenticated user)
+        settings: BERDL settings from environment variables
+
+    Yields:
+        SparkSession configured for the user
+    """
+    username = get_user_from_request(request)
+    logger.info(f"Creating Spark session for user: {username}")
+
+    # Read user's MinIO credentials
+    try:
+        minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+    except FileNotFoundError:
+        raise Exception(
+            f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
+            f"Ensure .berdl_minio_credentials exists at /home/{username}/.berdl_minio_credentials"
+        )
+    except Exception as e:
+        raise Exception(
+            f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+        )
+
+    base_user_settings = {
+        "USER": username,
+        "MINIO_ACCESS_KEY": minio_access_key,
+        "MINIO_SECRET_KEY": minio_secret_key,
+        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+        "MINIO_SECURE": settings.MINIO_SECURE,
+        "SPARK_HOME": settings.SPARK_HOME,
+        "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
+        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
+        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
+        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
+        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
+        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
+        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
+        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
+        "BERDL_POD_IP": settings.BERDL_POD_IP,
+    }
+
+    spark_connect_url = construct_user_spark_connect_url(username)
+    use_spark_connect = is_spark_connect_reachable(spark_connect_url, timeout=2.0)
+    spark_connect_failed = False
+
+    if use_spark_connect:
+        try:
+            user_settings = BERDLSettings(
+                SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                **base_user_settings,
+            )
+            spark = _get_spark_session(
+                app_name=f"datalake_mcp_server_{username}",
+                settings=user_settings,
+                use_spark_connect=True,
+            )
+            logger.info(f"✅ Connected via Spark Connect for user {username}")
+            yield spark
+            return
+
+        except Exception as e:
+            logger.error(
+                f"Spark Connect failed for {username}, falling back: {e}",
+                exc_info=True,
+            )
+            spark_connect_failed = True
+
+    if not use_spark_connect or spark_connect_failed:
+        # Fallback to Standalone mode (in-process)
+        master_urls_env = os.getenv(
+            "SHARED_SPARK_MASTER_URL",
+            "spark://sharedsparkclustermaster.prod:7077",
+        )
+        master_urls = [url.strip() for url in master_urls_env.split(",") if url.strip()]
+        if not master_urls:
+            master_urls = ["spark://sharedsparkclustermaster.prod:7077"]
+
+        shared_master_url = random.choice(master_urls)
+
+        fallback_settings = base_user_settings.copy()
+        if not fallback_settings.get("BERDL_POD_IP"):
+            fallback_settings["BERDL_POD_IP"] = "0.0.0.0"
+        fallback_settings["SPARK_MASTER_URL"] = AnyUrl(shared_master_url)
+        fallback_settings["SPARK_CONNECT_URL"] = AnyUrl("sc://localhost:15002")
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        app_name = f"datalake_mcp_server_{username}_{timestamp}"
 
         spark = _get_spark_session(
             app_name=app_name,
-            settings=fallback_settings,
+            settings=BERDLSettings(**fallback_settings),
             use_spark_connect=False,
         )
 
-        logger.info(
-            f"✅ Connected via shared Spark cluster for user {username} at {shared_master_url} "
-            f"(MinIO access key: {minio_access_key[:10]}...)"
-        )
+        logger.info(f"✅ Connected via shared Spark cluster for user {username}")
 
         try:
             yield spark
         finally:
-            # Cleanup: Must stop session to release cluster resources
             try:
-                logger.info("Stopping Spark session (shared cluster cleanup)")
-                # CRITICAL: Clear Hadoop FileSystem cache to prevent credential leakage
-                try:
-                    hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
-                    hadoop_fs.closeAll()
-                    logger.info("Cleared Hadoop FileSystem cache")
-                except Exception as fs_err:
-                    logger.info(f"Could not clear FileSystem cache: {fs_err}")
-
+                hadoop_fs = spark._jvm.org.apache.hadoop.fs.FileSystem
+                hadoop_fs.closeAll()
                 spark.stop()
-                logger.info("Spark session stopped successfully")
             except Exception as e:
-                logger.error(f"Error stopping Spark session: {e}", exc_info=True)
+                logger.error(f"Error stopping Spark session: {e}")

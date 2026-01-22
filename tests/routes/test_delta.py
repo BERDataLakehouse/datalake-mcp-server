@@ -3,7 +3,7 @@ Tests for the delta routes module.
 
 Tests cover:
 - All /delta/* endpoints with TestClient
-- Mock get_spark_session and auth dependencies
+- Mock get_spark_context and auth dependencies
 - Test error responses (401, 404, 422, 500)
 - Concurrent API requests
 """
@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.routes import delta
 from src.routes.delta import _extract_token_from_request, router
-from src.service.dependencies import get_spark_session, auth
+from src.service.dependencies import SparkContext, get_spark_context, auth
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
     DeltaTableNotFoundError,
@@ -54,14 +54,22 @@ def mock_app(mock_spark_session, mock_kbase_user):
     # Create mock user
     user = mock_kbase_user()
 
-    # Override dependencies
-    def mock_get_spark():
-        yield spark
+    # Override dependencies - return SparkContext simulating Connect mode
+    def mock_get_spark_context():
+        ctx = SparkContext(
+            spark=spark,
+            is_standalone_subprocess=False,  # Simulate Connect mode
+            settings_dict={},
+            app_name="test_app",
+            username=user.user,
+            auth_token=None,
+        )
+        yield ctx
 
     def mock_auth():
         return user
 
-    app.dependency_overrides[get_spark_session] = mock_get_spark
+    app.dependency_overrides[get_spark_context] = mock_get_spark_context
     app.dependency_overrides[auth] = mock_auth
 
     return app, spark, user
@@ -316,13 +324,20 @@ class TestListDatabasesEndpoint:
         spark = mock_spark_session()
         user = mock_kbase_user()
 
-        def mock_get_spark():
-            yield spark
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},
+                app_name="test_app",
+                username=user.user,
+            )
+            yield ctx
 
         def mock_auth():
             return user
 
-        app.dependency_overrides[get_spark_session] = mock_get_spark
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
         app.dependency_overrides[auth] = mock_auth
 
         client = TestClient(app)
@@ -351,13 +366,20 @@ class TestListDatabasesEndpoint:
         spark = mock_spark_session()
         user = mock_kbase_user()
 
-        def mock_get_spark():
-            yield spark
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},
+                app_name="test_app",
+                username=user.user,
+            )
+            yield ctx
 
         def mock_auth():
             return user
 
-        app.dependency_overrides[get_spark_session] = mock_get_spark
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
         app.dependency_overrides[auth] = mock_auth
 
         client = TestClient(app)
@@ -627,13 +649,20 @@ class TestErrorResponses:
         spark = mock_spark_session()
         user = mock_kbase_user()
 
-        def mock_get_spark():
-            yield spark
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},
+                app_name="test_app",
+                username=user.user,
+            )
+            yield ctx
 
         def mock_auth():
             return user
 
-        app.dependency_overrides[get_spark_session] = mock_get_spark
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
         app.dependency_overrides[auth] = mock_auth
 
         client = TestClient(app)
@@ -686,13 +715,20 @@ class TestConcurrentRequests:
             spark = MagicMock()
             user = KBaseUser(user="testuser", admin_perm=AdminPermission.NONE)
 
-            def mock_get_spark():
-                yield spark
+            def mock_get_spark_ctx():
+                ctx = SparkContext(
+                    spark=spark,
+                    is_standalone_subprocess=False,
+                    settings_dict={},
+                    app_name="test_app",
+                    username=user.user,
+                )
+                yield ctx
 
             def mock_auth():
                 return user
 
-            app.dependency_overrides[get_spark_session] = mock_get_spark
+            app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
             app.dependency_overrides[auth] = mock_auth
 
             client = TestClient(app)
@@ -728,13 +764,20 @@ class TestConcurrentRequests:
         spark = MagicMock()
         user = KBaseUser(user="testuser", admin_perm=AdminPermission.NONE)
 
-        def mock_get_spark():
-            yield spark
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},
+                app_name="test_app",
+                username=user.user,
+            )
+            yield ctx
 
         def mock_auth():
             return user
 
-        app.dependency_overrides[get_spark_session] = mock_get_spark
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
         app.dependency_overrides[auth] = mock_auth
 
         client = TestClient(app)
@@ -830,3 +873,332 @@ class TestTokenExtraction:
         token = _extract_token_from_request(request)
 
         assert token is None
+
+
+# =============================================================================
+# Standalone Subprocess Dispatch Tests
+# =============================================================================
+
+
+class TestStandaloneSubprocessDispatch:
+    """Tests for routes when in Standalone subprocess mode (is_standalone_subprocess=True)."""
+
+    def test_list_databases_standalone_dispatch(self, mock_kbase_user):
+        """Test that list_databases dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,  # No session in Standalone mode
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_list_dbs",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value=["db1", "db2"],
+        ) as mock_run:
+            response = client.post(
+                "/delta/databases/list",
+                json={"use_hms": True, "filter_by_namespace": False},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["databases"] == ["db1", "db2"]
+        mock_run.assert_called_once()
+
+    def test_list_tables_standalone_dispatch(self, mock_kbase_user):
+        """Test that list_tables dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_list_tables",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value=["table1", "table2"],
+        ) as mock_run:
+            response = client.post(
+                "/delta/databases/tables/list",
+                json={"database": "test_db", "use_hms": True},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["tables"] == ["table1", "table2"]
+        mock_run.assert_called_once()
+
+    def test_get_table_schema_standalone_dispatch(self, mock_kbase_user):
+        """Test that get_table_schema dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_schema",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value=["id", "name", "created_at"],
+        ) as mock_run:
+            response = client.post(
+                "/delta/databases/tables/schema",
+                json={"database": "test_db", "table": "test_table"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["columns"] == ["id", "name", "created_at"]
+        mock_run.assert_called_once()
+
+    def test_get_db_structure_standalone_dispatch(self, mock_kbase_user):
+        """Test that get_db_structure dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_structure",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value={"db1": ["table1"]},
+        ) as mock_run:
+            response = client.post(
+                "/delta/databases/structure",
+                json={"with_schema": False, "use_hms": True},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["structure"] == {"db1": ["table1"]}
+        mock_run.assert_called_once()
+
+    def test_count_table_standalone_dispatch(self, mock_kbase_user):
+        """Test that count_table dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_count",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value=42,
+        ) as mock_run:
+            response = client.post(
+                "/delta/tables/count",
+                json={"database": "test_db", "table": "test_table"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["count"] == 42
+        mock_run.assert_called_once()
+
+    def test_sample_table_standalone_dispatch(self, mock_kbase_user):
+        """Test that sample_table dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_sample",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value=[{"id": 1, "name": "test"}],
+        ) as mock_run:
+            response = client.post(
+                "/delta/tables/sample",
+                json={"database": "test_db", "table": "test_table", "limit": 10},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["sample"] == [{"id": 1, "name": "test"}]
+        mock_run.assert_called_once()
+
+    def test_query_table_standalone_dispatch(self, mock_kbase_user):
+        """Test that query_table dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_query",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value={
+                "result": [{"id": 1}],
+                "pagination": {
+                    "total_count": 1,
+                    "limit": 100,
+                    "offset": 0,
+                    "has_more": False,
+                },
+            },
+        ) as mock_run:
+            response = client.post(
+                "/delta/tables/query",
+                json={"query": "SELECT * FROM test_table"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["result"] == [{"id": 1}]
+        mock_run.assert_called_once()
+
+    def test_select_table_standalone_dispatch(self, mock_kbase_user):
+        """Test that select_table dispatches to run_in_spark_process in Standalone mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=None,
+                is_standalone_subprocess=True,
+                settings_dict={"USER": "testuser"},
+                app_name="mcp_select",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        client = TestClient(app)
+
+        with patch(
+            "src.routes.delta.run_in_spark_process",
+            return_value={
+                "data": [{"id": 1}],
+                "pagination": {
+                    "total_count": 1,
+                    "limit": 100,
+                    "offset": 0,
+                    "has_more": False,
+                },
+            },
+        ) as mock_run:
+            response = client.post(
+                "/delta/tables/select",
+                json={"database": "test_db", "table": "test_table"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == [{"id": 1}]
+        mock_run.assert_called_once()
