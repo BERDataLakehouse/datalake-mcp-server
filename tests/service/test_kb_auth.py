@@ -18,6 +18,7 @@ from src.service.kb_auth import (
     KBaseAuth,
     KBaseUser,
     AdminPermission,
+    MFAStatus,
     _check_error,
 )
 from src.service.exceptions import InvalidTokenError, MissingRoleError
@@ -231,14 +232,24 @@ class TestKBaseAuthGetUser:
         auth = MagicMock(spec=KBaseAuth)
         auth._url = "https://auth.kbase.us/"
         auth._me_url = "https://auth.kbase.us/api/V2/me"
+        auth._token_url = "https://auth.kbase.us/api/V2/token"
         auth._req_roles = {"BERDL_USER"}
         auth._full_roles = {"KBASE_ADMIN"}
+        auth._require_mfa = False  # Disable MFA for tests
+        auth._mfa_exempt_users = set()
         auth._cache = LRUCache(maxsize=100, ttl=300)
         auth._session = MagicMock()
 
         # Make get_user call the real implementation
         auth.get_user = lambda token: KBaseAuth.get_user(auth, token)
-        auth._get = AsyncMock()
+
+        # Mock _get to return different responses for /me vs /token
+        async def mock_get(url, headers):
+            if "token" in url:
+                return {"mfa": "Used", "user": "testuser"}
+            return {"user": "testuser", "customroles": ["BERDL_USER"]}
+
+        auth._get = mock_get
         auth._get_admin_role = lambda roles: KBaseAuth._get_admin_role(auth, roles)
 
         return auth
@@ -246,23 +257,23 @@ class TestKBaseAuthGetUser:
     @pytest.mark.asyncio
     async def test_valid_token_returns_user(self, mock_auth):
         """Test that valid token returns KBaseUser."""
-        mock_auth._get.return_value = {
-            "user": "testuser",
-            "customroles": ["BERDL_USER"],
-        }
-
         user = await mock_auth.get_user("valid_token")
 
         assert user.user == "testuser"
         assert user.admin_perm == AdminPermission.NONE
+        assert user.mfa_status == MFAStatus.USED
 
     @pytest.mark.asyncio
     async def test_admin_role_detected(self, mock_auth):
         """Test that admin role is detected."""
-        mock_auth._get.return_value = {
-            "user": "adminuser",
-            "customroles": ["BERDL_USER", "KBASE_ADMIN"],
-        }
+
+        # Override _get for this test to return admin role
+        async def mock_get(url, headers):
+            if "token" in url:
+                return {"mfa": "Used", "user": "adminuser"}
+            return {"user": "adminuser", "customroles": ["BERDL_USER", "KBASE_ADMIN"]}
+
+        mock_auth._get = mock_get
 
         user = await mock_auth.get_user("admin_token")
 
@@ -271,10 +282,14 @@ class TestKBaseAuthGetUser:
     @pytest.mark.asyncio
     async def test_missing_required_role_raises_error(self, mock_auth):
         """Test that missing required role raises MissingRoleError."""
-        mock_auth._get.return_value = {
-            "user": "norolesuser",
-            "customroles": [],  # Missing BERDL_USER
-        }
+
+        # Override _get for this test
+        async def mock_get(url, headers):
+            if "token" in url:
+                return {"mfa": "Used", "user": "norolesuser"}
+            return {"user": "norolesuser", "customroles": []}  # Missing BERDL_USER
+
+        mock_auth._get = mock_get
 
         with pytest.raises(MissingRoleError, match="missing required"):
             await mock_auth.get_user("noroles_token")
@@ -282,14 +297,26 @@ class TestKBaseAuthGetUser:
     @pytest.mark.asyncio
     async def test_cached_user_returned(self, mock_auth):
         """Test that cached user is returned without API call."""
-        # Pre-populate cache
-        mock_auth._cache.set("cached_token", ("cacheduser", AdminPermission.NONE))
+        # Pre-populate cache with 3-element tuple (user, admin_perm, mfa_status)
+        mock_auth._cache.set(
+            "cached_token", ("cacheduser", AdminPermission.NONE, MFAStatus.USED)
+        )
+
+        # Track if _get is called
+        get_called = {"value": False}
+        original_get = mock_auth._get
+
+        async def tracking_get(url, headers):
+            get_called["value"] = True
+            return await original_get(url, headers)
+
+        mock_auth._get = tracking_get
 
         user = await mock_auth.get_user("cached_token")
 
         assert user.user == "cacheduser"
         # _get should not be called because cache hit
-        mock_auth._get.assert_not_called()
+        assert not get_called["value"]
 
     @pytest.mark.asyncio
     async def test_empty_token_raises_error(self, mock_auth):
@@ -306,18 +333,23 @@ class TestKBaseAuthGetUser:
     @pytest.mark.asyncio
     async def test_user_cached_after_fetch(self, mock_auth):
         """Test that user is cached after successful fetch."""
-        mock_auth._get.return_value = {
-            "user": "newuser",
-            "customroles": ["BERDL_USER"],
-        }
+
+        # Override _get for this test
+        async def mock_get(url, headers):
+            if "token" in url:
+                return {"mfa": "Used", "user": "newuser"}
+            return {"user": "newuser", "customroles": ["BERDL_USER"]}
+
+        mock_auth._get = mock_get
 
         # First call
         await mock_auth.get_user("new_token")
 
-        # Verify cached
+        # Verify cached (3-element tuple now)
         cached = mock_auth._cache.get("new_token")
         assert cached is not None
         assert cached[0] == "newuser"
+        assert cached[2] == MFAStatus.USED
 
 
 # =============================================================================
@@ -405,14 +437,19 @@ class TestConcurrentAuthAccess:
         auth = MagicMock()
         auth._url = "https://auth.kbase.us/"
         auth._me_url = "https://auth.kbase.us/api/V2/me"
+        auth._token_url = "https://auth.kbase.us/api/V2/token"
         auth._req_roles = {"BERDL_USER"}
         auth._full_roles = {"KBASE_ADMIN"}
+        auth._require_mfa = False  # Disable MFA for tests
+        auth._mfa_exempt_users = set()
         auth._cache = LRUCache(maxsize=100, ttl=300)
 
         call_count = {"value": 0}
         lock = asyncio.Lock()
 
         async def mock_get(url, headers):
+            if "token" in url:
+                return {"mfa": "Used", "user": "testuser"}
             async with lock:
                 call_count["value"] += 1
             # Small delay to simulate network
@@ -442,11 +479,17 @@ class TestConcurrentAuthAccess:
         auth = MagicMock()
         auth._url = "https://auth.kbase.us/"
         auth._me_url = "https://auth.kbase.us/api/V2/me"
+        auth._token_url = "https://auth.kbase.us/api/V2/token"
         auth._req_roles = {"BERDL_USER"}
         auth._full_roles = set()
+        auth._require_mfa = False  # Disable MFA for tests
+        auth._mfa_exempt_users = set()
         auth._cache = LRUCache(maxsize=100, ttl=300)
 
         async def mock_get(url, headers):
+            if "token" in url:
+                token = headers.get("Authorization", "unknown")
+                return {"mfa": "Used", "user": f"user_{token}"}
             token = headers.get("Authorization", "unknown")
             return {"user": f"user_{token}", "customroles": ["BERDL_USER"]}
 
@@ -490,6 +533,13 @@ class TestAuthIntegration:
             return_value={"user": "integrationuser", "customroles": ["BERDL_USER"]}
         )
 
+        # Mock /token response for MFA check
+        token_response = MagicMock()
+        token_response.status = 200
+        token_response.json = AsyncMock(
+            return_value={"mfa": "Used", "user": "integrationuser"}
+        )
+
         call_count = 0
 
         def get_side_effect(url, headers=None):
@@ -498,6 +548,8 @@ class TestAuthIntegration:
             cm = MagicMock()
             if call_count == 1:
                 cm.__aenter__ = AsyncMock(return_value=init_response)
+            elif "token" in url:
+                cm.__aenter__ = AsyncMock(return_value=token_response)
             else:
                 cm.__aenter__ = AsyncMock(return_value=me_response)
             cm.__aexit__ = AsyncMock(return_value=None)
@@ -508,10 +560,11 @@ class TestAuthIntegration:
         mock_session.closed = False
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            # Create auth
+            # Create auth with MFA disabled for testing
             auth = await KBaseAuth.create(
                 "https://auth.kbase.us/",
                 required_roles=["BERDL_USER"],
+                require_mfa=False,
             )
 
             # Get user

@@ -20,6 +20,7 @@ from src.service.exceptions import (
     InvalidS3PathError,
     InvalidTokenError,
     MCPServerError,
+    MissingMFAError,
     MissingRoleError,
     MissingTokenError,
     S3AccessError,
@@ -53,6 +54,7 @@ _ERR_MAP = {
     InvalidAuthHeaderError: ErrorMapping(ErrorType.INVALID_AUTH_HEADER, _H401),
     InvalidTokenError: ErrorMapping(ErrorType.INVALID_TOKEN, _H401),
     MissingRoleError: ErrorMapping(ErrorType.MISSING_ROLE, _H403),
+    MissingMFAError: ErrorMapping(ErrorType.MISSING_MFA, _H403),
     AuthenticationError: ErrorMapping(ErrorType.AUTHENTICATION_FAILED, _H401),
     # Delta Lake specific errors
     InvalidS3PathError: ErrorMapping(ErrorType.INVALID_S3_PATH, _H400),
