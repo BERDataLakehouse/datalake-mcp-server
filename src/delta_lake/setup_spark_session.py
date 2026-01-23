@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import threading
+import time
 import warnings
 from datetime import datetime
 from typing import Any
@@ -65,6 +66,14 @@ EXECUTOR_MEMORY_OVERHEAD = (
     0.1  # 10% overhead for executors (accounts for JVM + system overhead)
 )
 DRIVER_MEMORY_OVERHEAD = 0.05  # 5% overhead for driver (typically less memory pressure)
+
+# Session errors that indicate a stale/closed session requiring recreation
+# These errors occur when the Spark Connect server has restarted or the session has timed out
+SESSION_CLOSED_ERRORS = [
+    "INVALID_HANDLE.SESSION_CLOSED",
+    "INVALID_HANDLE.SESSION_CHANGED",
+    "INVALID_HANDLE.SESSION_NOT_FOUND",
+]
 
 # =============================================================================
 # PRIVATE HELPER FUNCTIONS
@@ -389,6 +398,10 @@ def _clear_stale_spark_connect_sessions() -> None:
 
     This is NOT needed for Standalone mode where sessions share JVM state.
     """
+    logger.debug("Clearing stale Spark Connect sessions...")
+    cleared_active = False
+    cleared_default = False
+
     try:
         with RemoteSparkSession._lock:
             # Clear thread-local active session
@@ -397,23 +410,76 @@ def _clear_stale_spark_connect_sessions() -> None:
                     RemoteSparkSession._active_session, "session", None
                 )
                 if old_session is not None:
+                    session_id = getattr(old_session, "session_id", "unknown")
                     logger.info(
                         f"Clearing stale Spark Connect active session: "
-                        f"session_id={getattr(old_session, 'session_id', 'unknown')}"
+                        f"session_id={session_id}"
                     )
+                    # Best-effort cleanup: try to stop the old session to release
+                    # gRPC channels/resources before clearing the reference
+                    try:
+                        old_session.stop()
+                    except Exception:
+                        # Session may already be invalid - that's expected
+                        logger.debug(
+                            f"Could not stop stale active session {session_id} "
+                            f"(may already be closed)"
+                        )
                     RemoteSparkSession._active_session.session = None
+                    cleared_active = True
 
             # Clear global default session
             if RemoteSparkSession._default_session is not None:
+                session_id = getattr(
+                    RemoteSparkSession._default_session, "session_id", "unknown"
+                )
                 logger.info(
                     f"Clearing stale Spark Connect default session: "
-                    f"session_id={getattr(RemoteSparkSession._default_session, 'session_id', 'unknown')}"
+                    f"session_id={session_id}"
                 )
+                # Best-effort cleanup: try to stop the old session
+                try:
+                    RemoteSparkSession._default_session.stop()
+                except Exception:
+                    # Session may already be invalid - that's expected
+                    logger.debug(
+                        f"Could not stop stale default session {session_id} "
+                        f"(may already be closed)"
+                    )
                 RemoteSparkSession._default_session = None
+                cleared_default = True
+
+        # Log summary of what was cleared
+        if cleared_active or cleared_default:
+            logger.info(
+                f"Cleared stale sessions: active={cleared_active}, default={cleared_default}"
+            )
+        else:
+            logger.debug("No stale sessions found to clear")
 
     except Exception as e:
         # Don't fail the session creation just because cache clearing failed
-        logger.warning(f"Failed to clear stale Spark Connect sessions: {e}")
+        # Include traceback for debugging (per Copilot feedback)
+        logger.warning(
+            f"Failed to clear stale Spark Connect sessions: {e}", exc_info=True
+        )
+
+
+def _is_session_error(error: Exception) -> bool:
+    """
+    Check if an error indicates a stale/closed session that requires recreation.
+
+    These errors occur when the Spark Connect server has restarted or the session
+    has timed out, making the client's cached session_id invalid.
+
+    Args:
+        error: The exception to check
+
+    Returns:
+        True if the error is a session-related error that can be retried
+    """
+    error_str = str(error)
+    return any(err in error_str for err in SESSION_CLOSED_ERRORS)
 
 
 def generate_spark_conf(
@@ -584,7 +650,31 @@ def get_spark_session(
         spark_conf = SparkConf(loadDefaults=False).setAll(list(config.items()))
 
         # Use the same builder instance that we cleared
-        spark = builder.config(conf=spark_conf).getOrCreate()
+        if use_spark_connect and not local:
+            # CRITICAL: Use create() instead of getOrCreate() for remote Spark Connect mode.
+            # getOrCreate() checks cached sessions first and may reuse stale session_ids
+            # from sessions that the server has already closed (e.g., after server restart).
+            # create() always generates a fresh session_id via uuid.uuid4(), ensuring
+            # we never send a stale session_id to the server.
+            # Note: This only applies to remote Spark Connect, not local sessions.
+            logger.info(
+                f"Creating Spark Connect session using create() "
+                f"(app_name={app_name}, remote={config.get('spark.remote', 'N/A')})"
+            )
+            spark = builder.config(conf=spark_conf).create()
+
+            # Log the session_id to verify it's a fresh UUID
+            session_id = getattr(spark, "session_id", "unknown")
+            logger.info(
+                f"Spark Connect session created successfully: session_id={session_id}"
+            )
+        else:
+            # Standalone mode or local mode: getOrCreate() is safe because:
+            # - Standalone: sessions share the same JVM, no server-side session registry
+            # - Local: no remote server, session state is all in-process
+            mode = "local" if local else "standalone"
+            logger.info(f"Creating {mode} session using getOrCreate()")
+            spark = builder.config(conf=spark_conf).getOrCreate()
 
         if not use_spark_connect:
             logger.info("Standalone session creation complete, releasing lock")
@@ -595,3 +685,120 @@ def get_spark_session(
         _set_scheduler_pool(spark, scheduler_pool)
 
     return spark
+
+
+def get_spark_session_with_retry(
+    app_name: str | None = None,
+    local: bool = False,
+    delta_lake: bool = True,
+    scheduler_pool: str = SPARK_DEFAULT_POOL,
+    use_s3: bool = True,
+    use_hive: bool = True,
+    settings: BERDLSettings | None = None,
+    tenant_name: str | None = None,
+    use_spark_connect: bool = True,
+    override: dict[str, Any] | None = None,
+    max_retries: int = 2,
+) -> SparkSession:
+    """
+    Get a Spark session with automatic retry on stale session errors.
+
+    This wrapper around get_spark_session() handles INVALID_HANDLE.SESSION_CLOSED
+    errors by automatically retrying with a fresh session. This is particularly
+    useful for Spark Connect mode where the server may have restarted since
+    the last request.
+
+    Args:
+        app_name: Application name. If None, generates a timestamp-based name
+        local: If True, creates a local Spark session
+        delta_lake: If True, enables Delta Lake support
+        scheduler_pool: Fair scheduler pool name (default: "default")
+        use_s3: If True, enables S3/MinIO integration
+        use_hive: If True, enables Hive metastore integration
+        settings: BERDLSettings instance. If None, creates from env vars
+        tenant_name: Tenant/group name for SQL warehouse location
+        use_spark_connect: If True, uses Spark Connect instead of legacy mode
+        override: Dictionary of config overrides
+        max_retries: Maximum number of retry attempts (default: 2)
+
+    Returns:
+        Configured SparkSession instance
+
+    Raises:
+        Exception: If session creation fails after all retries
+
+    Example:
+        >>> spark = get_spark_session_with_retry(
+        ...     app_name="MyApp",
+        ...     use_spark_connect=True,
+        ...     max_retries=2,
+        ... )
+    """
+    last_error: Exception | None = None
+    username = settings.USER if settings else "unknown"
+
+    logger.info(
+        f"get_spark_session_with_retry called for user={username}, "
+        f"use_spark_connect={use_spark_connect}, max_retries={max_retries}"
+    )
+
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                backoff_ms = int(0.1 * (2**attempt) * 1000)
+                logger.info(
+                    f"[{username}] Session retry attempt {attempt}/{max_retries} "
+                    f"after stale session error (backoff={backoff_ms}ms)"
+                )
+                # Clear stale sessions before retry
+                _clear_stale_spark_connect_sessions()
+                # Exponential backoff: 100ms, 200ms, 400ms...
+                time.sleep(0.1 * (2**attempt))
+            else:
+                logger.info(f"[{username}] First session creation attempt")
+
+            session = get_spark_session(
+                app_name=app_name,
+                local=local,
+                delta_lake=delta_lake,
+                scheduler_pool=scheduler_pool,
+                use_s3=use_s3,
+                use_hive=use_hive,
+                settings=settings,
+                tenant_name=tenant_name,
+                use_spark_connect=use_spark_connect,
+                override=override,
+            )
+
+            logger.info(
+                f"[{username}] Session created successfully on attempt {attempt + 1}"
+            )
+            return session
+
+        except Exception as e:
+            is_session_err = _is_session_error(e)
+            logger.warning(
+                f"[{username}] Session creation failed on attempt {attempt + 1}: "
+                f"is_session_error={is_session_err}, "
+                f"error={type(e).__name__}: {e}"
+            )
+
+            if is_session_err and attempt < max_retries:
+                logger.info(
+                    f"[{username}] Will retry (attempt {attempt + 1} of {max_retries + 1})"
+                )
+                last_error = e
+                continue
+
+            # Either not a session error, or we've exhausted retries
+            if is_session_err:
+                logger.error(
+                    f"[{username}] Exhausted all {max_retries + 1} retry attempts "
+                    f"for session error: {e}"
+                )
+            raise
+
+    # This should not be reached, but just in case
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Session creation failed after {max_retries + 1} attempts")

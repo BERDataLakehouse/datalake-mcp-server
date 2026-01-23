@@ -21,7 +21,10 @@ from pyspark.sql import SparkSession
 
 # Use MCP server's local copy of spark session utilities
 # (copied from berdl_notebook_utils but adapted for shared multi-user service)
-from src.delta_lake.setup_spark_session import get_spark_session as _get_spark_session
+from src.delta_lake.setup_spark_session import (
+    get_spark_session as _get_spark_session,
+    get_spark_session_with_retry as _get_spark_session_with_retry,
+)
 from src.service import app_state
 from src.service.exceptions import MissingTokenError
 from src.service.http_bearer import KBaseHTTPBearer
@@ -470,11 +473,26 @@ def get_spark_context(
             )
 
             app_name = f"datalake_mcp_server_{username}"
-            spark = _get_spark_session(
+            # Use retry wrapper to handle INVALID_HANDLE.SESSION_CLOSED errors
+            # that occur when the Spark Connect server has restarted
+            spark = _get_spark_session_with_retry(
                 app_name=app_name,
                 settings=user_settings,
                 use_spark_connect=True,
+                max_retries=2,
             )
+
+            # Validate session works before returning by making a quick server round-trip
+            # This catches any remaining edge cases where session appears valid but isn't
+            try:
+                _ = spark.version
+            except Exception as validation_error:
+                logger.warning(
+                    f"Session validation failed for {username}, session may be unusable: "
+                    f"{type(validation_error).__name__}: {validation_error}"
+                )
+                raise
+
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
             # Yield SparkContext with active session
