@@ -398,7 +398,16 @@ def _clear_stale_spark_connect_sessions() -> None:
 
     This is NOT needed for Standalone mode where sessions share JVM state.
     """
-    logger.debug("Clearing stale Spark Connect sessions...")
+    # NOTE: We intentionally do NOT call stop() on cached sessions here!
+    # Calling stop() closes the gRPC channel, which would kill queries from
+    # concurrent requests that are still using that session. Instead, we just
+    # clear the cache references. The old sessions will be garbage collected,
+    # and their channels will be closed when no more references exist.
+    #
+    # Since we use create() instead of getOrCreate(), each request gets its own
+    # fresh session anyway, so clearing the cache just prevents PySpark's
+    # internal logic from accidentally reusing stale sessions.
+    logger.debug("Clearing Spark Connect session cache (without stopping)...")
     cleared_active = False
     cleared_default = False
 
@@ -411,20 +420,11 @@ def _clear_stale_spark_connect_sessions() -> None:
                 )
                 if old_session is not None:
                     session_id = getattr(old_session, "session_id", "unknown")
-                    logger.info(
-                        f"Clearing stale Spark Connect active session: "
-                        f"session_id={session_id}"
+                    logger.debug(
+                        f"Clearing active session cache: session_id={session_id} "
+                        f"(session NOT stopped, may still be in use)"
                     )
-                    # Best-effort cleanup: try to stop the old session to release
-                    # gRPC channels/resources before clearing the reference
-                    try:
-                        old_session.stop()
-                    except Exception:
-                        # Session may already be invalid - that's expected
-                        logger.debug(
-                            f"Could not stop stale active session {session_id} "
-                            f"(may already be closed)"
-                        )
+                    # DO NOT call stop() - other requests may still be using this session
                     RemoteSparkSession._active_session.session = None
                     cleared_active = True
 
@@ -433,29 +433,21 @@ def _clear_stale_spark_connect_sessions() -> None:
                 session_id = getattr(
                     RemoteSparkSession._default_session, "session_id", "unknown"
                 )
-                logger.info(
-                    f"Clearing stale Spark Connect default session: "
-                    f"session_id={session_id}"
+                logger.debug(
+                    f"Clearing default session cache: session_id={session_id} "
+                    f"(session NOT stopped, may still be in use)"
                 )
-                # Best-effort cleanup: try to stop the old session
-                try:
-                    RemoteSparkSession._default_session.stop()
-                except Exception:
-                    # Session may already be invalid - that's expected
-                    logger.debug(
-                        f"Could not stop stale default session {session_id} "
-                        f"(may already be closed)"
-                    )
+                # DO NOT call stop() - other requests may still be using this session
                 RemoteSparkSession._default_session = None
                 cleared_default = True
 
         # Log summary of what was cleared
         if cleared_active or cleared_default:
-            logger.info(
-                f"Cleared stale sessions: active={cleared_active}, default={cleared_default}"
+            logger.debug(
+                f"Cleared session cache: active={cleared_active}, default={cleared_default}"
             )
         else:
-            logger.debug("No stale sessions found to clear")
+            logger.debug("No cached sessions to clear")
 
     except Exception as e:
         # Don't fail the session creation just because cache clearing failed
