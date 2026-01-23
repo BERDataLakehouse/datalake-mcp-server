@@ -57,6 +57,12 @@ class MissingRoleError(AuthenticationError):
     """
 
 
+class MissingMFAError(AuthenticationError):
+    """
+    An error thrown when a user's token was not created with MFA.
+    """
+
+
 class DeltaLakeError(MCPServerError):
     """
     Base class for Delta Lake related errors.

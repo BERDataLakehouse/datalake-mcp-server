@@ -29,6 +29,9 @@ class ErrorType(Enum):
     MISSING_ROLE = (10040, "Missing required role")
     """ The user is missing a required role. """
 
+    MISSING_MFA = (10050, "Missing MFA authentication")
+    """ The token was not created with multi-factor authentication. """
+
     # ----- Delta Lake specific error types -----
     DELTA_LAKE_ERROR = (20000, "Delta Lake error")
     """ A general error related to Delta Lake. """
