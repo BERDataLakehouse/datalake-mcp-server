@@ -462,6 +462,7 @@ def get_spark_context(
         try:
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
+                KBASE_AUTH_TOKEN=auth_token or "",
                 **{
                     k: v
                     for k, v in base_user_settings_dict.items()

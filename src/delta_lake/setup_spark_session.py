@@ -167,7 +167,15 @@ def _get_executor_conf(
     )
 
     if use_spark_connect:
-        conf_base = {"spark.remote": str(settings.SPARK_CONNECT_URL)}
+        # Include KBase auth token for Spark Connect authentication
+        base_url = str(settings.SPARK_CONNECT_URL).rstrip("/")
+        token_part = (
+            f";x-kbase-token={settings.KBASE_AUTH_TOKEN}"
+            if settings.KBASE_AUTH_TOKEN
+            else ""
+        )
+        spark_connect_url = f"{base_url}/{token_part}"
+        conf_base = {"spark.remote": spark_connect_url}
     else:
         driver_host = socket.gethostbyname(socket.gethostname())
 
