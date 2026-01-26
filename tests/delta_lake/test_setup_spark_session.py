@@ -180,7 +180,11 @@ class TestGetExecutorConf:
         config = _get_executor_conf(test_settings, use_spark_connect=True)
 
         assert "spark.remote" in config
-        assert config["spark.remote"] == str(test_settings.SPARK_CONNECT_URL)
+        # Expect x-kbase-token in URL
+        assert ";x-kbase-token=test_token" in config["spark.remote"]
+        assert (
+            str(test_settings.SPARK_CONNECT_URL).rstrip("/") in config["spark.remote"]
+        )
         assert "spark.driver.host" not in config  # Not in Connect mode
         assert "spark.master" not in config  # Not in Connect mode
 
