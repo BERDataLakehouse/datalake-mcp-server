@@ -57,6 +57,10 @@ VALID_QUERIES = [
     "SELECT * FROM sales WHERE region = 'North' AND amount > 1000",
     "SELECT COALESCE(email, phone, 'no contact') FROM contacts",
     "SELECT * FROM employees WHERE department LIKE 'eng%'",
+    "DESCRIBE my_table",
+    "SHOW TABLES",
+    "describe extended my_table",
+    "show databases",
 ]
 
 # Invalid queries grouped by expected error message
@@ -73,7 +77,7 @@ INVALID_QUERIES = {
         "   ",
         "\n\n",
     ],
-    "must be one of the following: select": [
+    "is not allowed. Allowed types": [
         # Non-SELECT statements
         "INSERT INTO users VALUES (1, 'john')",
         "UPDATE users SET active = true WHERE id = 1",

@@ -69,6 +69,14 @@ ALLOWED_STATEMENTS = {
     "select",
 }
 
+# These statements are identified as 'UNKNOWN' type by sqlparse, so we cannot
+# include them in ALLOWED_STATEMENTS (which checks get_type()).
+# Instead, we check the first token of the statement against this list.
+ALLOWED_UNKNOWN_STATEMENTS = {
+    "describe",
+    "show",
+}
+
 FORBIDDEN_POSTGRESQL_SCHEMAS = {
     # NOTE: This might create false positives, legitemate queries might include these schemas
     # e.g. "SELECT * FROM jpg_files"
@@ -152,10 +160,25 @@ def _check_query_is_valid(query: str) -> bool:
         raise SparkQueryError(f"Query {query} must contain exactly one statement")
 
     statement = statements[0]
-    # NOTE: statement might have subqueries, we only check the main statement here!
-    if statement.get_type().lower() not in ALLOWED_STATEMENTS:
+    stmt_type = statement.get_type().lower()
+
+    # Check for allowed statement types
+    is_allowed = False
+
+    # Check if it's a known allowed type (like SELECT)
+    if stmt_type in ALLOWED_STATEMENTS:
+        is_allowed = True
+
+    # Check if it's an UNKNOWN type but allowed by first token (like DESCRIBE, SHOW)
+    elif stmt_type == "unknown":
+        first_token = statement.token_first()
+        if first_token and first_token.value.lower() in ALLOWED_UNKNOWN_STATEMENTS:
+            is_allowed = True
+
+    if not is_allowed:
         raise SparkQueryError(
-            f"Query {query} must be one of the following: {', '.join(ALLOWED_STATEMENTS)}, got {statement.get_type()}"
+            f"Query {query} is not allowed. Allowed types: {', '.join(ALLOWED_STATEMENTS)} "
+            f"or {', '.join(ALLOWED_UNKNOWN_STATEMENTS)}. Got type: {stmt_type}"
         )
 
     if any(schema in query.lower() for schema in FORBIDDEN_POSTGRESQL_SCHEMAS):
