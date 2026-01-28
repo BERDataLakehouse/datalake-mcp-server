@@ -444,7 +444,7 @@ def _execute_non_paginatable_query(
     Raises:
         SparkOperationError: If query execution fails.
     """
-    base_query = query.rstrip().rstrip(";")
+    base_query = query.rstrip()
 
     namespace = "metadata_query"
     params = {"query": base_query}
@@ -494,7 +494,7 @@ def _execute_non_paginatable_query(
 
     except SparkTimeoutError:
         raise  # Re-raise timeout errors as-is
-    except BaseException as e:
+    except Exception as e:
         logger.error(f"Error executing metadata query: {e}")
         raise SparkOperationError(f"Failed to execute metadata query: {str(e)}") from e
 
