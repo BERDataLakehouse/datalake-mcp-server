@@ -97,6 +97,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request_user = None
         auth_header = request.headers.get("Authorization")
 
+        # Authentication logic is wrapped in try/except to handle auth errors cleanly
+        # IMPORTANT: call_next() is intentionally OUTSIDE this block so downstream
+        # request errors (e.g., Spark errors) are NOT caught and misreported as auth errors
         try:
             if auth_header:
                 scheme, credentials = get_authorization_scheme_param(auth_header)
@@ -114,7 +117,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 request_user = await app_state_obj.auth.get_user(credentials)
 
             app_state.set_request_user(request, request_user)
-            return await call_next(request)
 
         except MCPServerError as exc:
             # Handle auth errors (InvalidTokenError, MissingRoleError, etc.) cleanly
@@ -141,6 +143,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content=error_response.model_dump(),
             )
+
+        # Process the request - errors here will propagate to the exception handler
+        return await call_next(request)
 
 
 def create_application() -> FastAPI:
