@@ -77,6 +77,14 @@ ALLOWED_UNKNOWN_STATEMENTS = {
     "show",
 }
 
+# SQL commands that don't support LIMIT/OFFSET clauses
+# These are metadata/DDL commands that return fixed result sets
+NON_PAGINATABLE_COMMANDS = {
+    "describe",
+    "show",
+    "explain",
+}
+
 FORBIDDEN_POSTGRESQL_SCHEMAS = {
     # NOTE: This might create false positives, legitemate queries might include these schemas
     # e.g. "SELECT * FROM jpg_files"
@@ -104,6 +112,25 @@ def _extract_limit_from_query(query: str) -> Optional[int]:
     if match:
         return int(match.group(1))
     return None
+
+
+def _is_non_paginatable_query(query: str) -> bool:
+    """
+    Check if a SQL query is a metadata command that doesn't support LIMIT/OFFSET.
+
+    Commands like DESCRIBE, SHOW, and EXPLAIN return fixed result sets and
+    don't accept pagination clauses.
+
+    Args:
+        query: SQL query string
+
+    Returns:
+        True if the query is a non-paginatable metadata command, False otherwise
+    """
+    # Get the first word of the query (the command)
+    stripped = query.strip().lower()
+    first_word = stripped.split()[0] if stripped else ""
+    return first_word in NON_PAGINATABLE_COMMANDS
 
 
 def _enforce_query_limit(query: str, max_rows: int = MAX_QUERY_ROWS) -> str:
@@ -394,6 +421,85 @@ def sample_delta_table(
         )
 
 
+def _execute_non_paginatable_query(
+    spark: SparkSession,
+    query: str,
+    use_cache: bool = True,
+    username: str | None = None,
+) -> TableQueryResponse:
+    """
+    Execute a metadata query that doesn't support LIMIT/OFFSET pagination.
+
+    Commands like DESCRIBE, SHOW, and EXPLAIN return fixed result sets.
+    This function executes them directly without adding pagination clauses.
+
+    Args:
+        spark: The SparkSession object.
+        query: The SQL query string (DESCRIBE, SHOW, EXPLAIN, etc.).
+        use_cache: Whether to use the redis cache to store the result.
+        username: Username for cache key isolation.
+
+    Returns:
+        TableQueryResponse with all results and pagination info showing complete data.
+
+    Raises:
+        SparkOperationError: If query execution fails.
+    """
+    base_query = query.rstrip().rstrip(";")
+
+    namespace = "metadata_query"
+    params = {"query": base_query}
+    cache_key = _generate_cache_key(params, username=username)
+
+    if use_cache:
+        cached_result = _get_from_cache(namespace, cache_key)
+        if cached_result:
+            logger.info(f"Cache hit for metadata query: {base_query[:50]}...")
+            return TableQueryResponse(
+                result=cached_result[0]["result"],
+                pagination=PaginationInfo(**cached_result[0]["pagination"]),
+            )
+
+    logger.info(f"Executing metadata query (no pagination): {base_query[:100]}...")
+
+    try:
+        df = spark.sql(base_query)
+        results = run_with_timeout(
+            lambda: [row.asDict() for row in df.collect()],
+            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            operation_name="metadata_query",
+        )
+        logger.info(f"Metadata query returned {len(results)} rows.")
+
+        # For non-paginatable queries, we return all results with pagination
+        # info indicating there's no more data
+        pagination = PaginationInfo(
+            limit=len(results),
+            offset=0,
+            total_count=len(results),
+            has_more=False,
+        )
+
+        response = TableQueryResponse(result=results, pagination=pagination)
+
+        if use_cache:
+            cache_data = [
+                {
+                    "result": results,
+                    "pagination": pagination.model_dump(),
+                }
+            ]
+            _store_in_cache(namespace, cache_key, cache_data)
+
+        return response
+
+    except SparkTimeoutError:
+        raise  # Re-raise timeout errors as-is
+    except BaseException as e:
+        logger.error(f"Error executing metadata query: {e}")
+        raise SparkOperationError(f"Failed to execute metadata query: {str(e)}") from e
+
+
 def query_delta_table(
     spark: SparkSession,
     query: str,
@@ -431,6 +537,13 @@ def query_delta_table(
     """
     # Validate query structure first
     _check_query_is_valid(query)
+
+    # Check if this is a metadata command that doesn't support pagination
+    # (e.g., DESCRIBE, SHOW, EXPLAIN)
+    if _is_non_paginatable_query(query):
+        return _execute_non_paginatable_query(
+            spark, query, use_cache=use_cache, username=username
+        )
 
     # Enforce max limit
     if limit > MAX_QUERY_ROWS:
