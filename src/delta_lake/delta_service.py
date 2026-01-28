@@ -69,21 +69,20 @@ ALLOWED_STATEMENTS = {
     "select",
 }
 
-# These statements are identified as 'UNKNOWN' type by sqlparse, so we cannot
-# include them in ALLOWED_STATEMENTS (which checks get_type()).
-# Instead, we check the first token of the statement against this list.
-ALLOWED_UNKNOWN_STATEMENTS = {
-    "describe",
-    "show",
-}
-
-# SQL commands that don't support LIMIT/OFFSET clauses
-# These are metadata/DDL commands that return fixed result sets
-NON_PAGINATABLE_COMMANDS = {
+METADATA_COMMANDS = {
     "describe",
     "show",
     "explain",
 }
+
+# These statements are identified as 'UNKNOWN' type by sqlparse, so we cannot
+# include them in ALLOWED_STATEMENTS (which checks get_type()).
+# Instead, we check the first token of the statement against this list.
+ALLOWED_UNKNOWN_STATEMENTS = METADATA_COMMANDS
+
+# SQL commands that don't support LIMIT/OFFSET clauses
+# These are metadata/DDL commands that return fixed result sets
+NON_PAGINATABLE_COMMANDS = METADATA_COMMANDS
 
 FORBIDDEN_POSTGRESQL_SCHEMAS = {
     # NOTE: This might create false positives, legitemate queries might include these schemas
