@@ -80,6 +80,9 @@ async def universal_error_handler(request: Request, exc: Exception):
     else:
         # handle all other generic exceptions
         logger.error("Unhandled exception: %s", exc, exc_info=True)
-        message = "An unexpected error occurred"
+        # Include actual error details for debugging
+        exc_type = type(exc).__name__
+        exc_message = str(exc) if str(exc) else "No error message available"
+        message = f"An unexpected error occurred: {exc_type}: {exc_message}"
 
     return _format_error(status_code, error_code, error_type_str, message)
