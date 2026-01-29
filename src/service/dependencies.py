@@ -459,6 +459,9 @@ def get_spark_context(
             "Spark Connect server reachable, creating session (no lock required)"
         )
 
+        # Session creation phase - exceptions here trigger fallback to Standalone
+        spark = None
+        app_name = f"datalake_mcp_server_{username}"
         try:
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
@@ -473,7 +476,6 @@ def get_spark_context(
                 else None,
             )
 
-            app_name = f"datalake_mcp_server_{username}"
             # Use retry wrapper to handle INVALID_HANDLE.SESSION_CLOSED errors
             # that occur when the Spark Connect server has restarted
             spark = _get_spark_session_with_retry(
@@ -496,23 +498,6 @@ def get_spark_context(
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
-            # Yield SparkContext with active session
-            ctx = SparkContext(
-                spark=spark,
-                is_standalone_subprocess=False,
-                settings_dict={},  # Not needed for Connect mode
-                app_name=app_name,
-                username=username,
-                auth_token=auth_token,
-            )
-            yield ctx
-
-            # No cleanup: Connect sessions belong to user's notebook pod
-            logger.debug(
-                "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
-            )
-            return  # Successfully completed with Spark Connect
-
         except Exception as e:
             # Spark Connect session creation failed despite health check passing
             # This can happen due to race conditions or transient network issues
@@ -522,6 +507,26 @@ def get_spark_context(
                 exc_info=True,
             )
             spark_connect_failed = True
+
+        # Yield phase - OUTSIDE the try/except so route execution errors propagate
+        # correctly instead of triggering a fallback (which would yield twice)
+        if spark is not None and not spark_connect_failed:
+            ctx = SparkContext(
+                spark=spark,
+                is_standalone_subprocess=False,
+                settings_dict={},  # Not needed for Connect mode
+                app_name=app_name,
+                username=username,
+                auth_token=auth_token,
+            )
+            try:
+                yield ctx
+            finally:
+                # No cleanup: Connect sessions belong to user's notebook pod
+                logger.debug(
+                    "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
+                )
+            return  # Successfully completed with Spark Connect
 
     if not use_spark_connect or spark_connect_failed:
         # =======================================================================
@@ -579,8 +584,11 @@ def get_spark_context(
             username=username,
             auth_token=auth_token,
         )
-        yield ctx
-        # No cleanup needed - subprocess handles its own session lifecycle
+        try:
+            yield ctx
+        finally:
+            # No cleanup needed - subprocess handles its own session lifecycle
+            pass
 
 
 # Keep get_spark_session for backward compatibility with existing routes
