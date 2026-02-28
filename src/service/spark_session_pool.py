@@ -166,8 +166,8 @@ def get_pool_status() -> dict[str, Any]:
         return {
             "initialized": False,
             "max_workers": STANDALONE_POOL_SIZE,
-        "timeout_seconds": SPARK_STANDALONE_QUERY_TIMEOUT,
-    }
+            "timeout_seconds": SPARK_STANDALONE_QUERY_TIMEOUT,
+        }
 
     return {
         "initialized": True,

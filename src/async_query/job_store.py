@@ -263,5 +263,3 @@ def expire_stale_job(client: Any, job: JobRecord) -> JobRecord:
     job.completed_at = datetime.now(timezone.utc)
     job.error_message = error_msg
     return job
-
-

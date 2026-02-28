@@ -1046,7 +1046,7 @@ class TestMountedRouteHandler:
             mock_handle.return_value = mock_resp
 
             client = TestClient(mock_fastapi_mcp.fastapi)
-            response = client.post("/mcp", content=b'{}')
+            response = client.post("/mcp", content=b"{}")
 
             mock_handle.assert_called_once()
             assert response.status_code == 200

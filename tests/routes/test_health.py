@@ -143,9 +143,7 @@ class TestCheckHiveMetastore:
 
     @patch("src.routes.health.get_hive_metastore_client")
     @patch("src.routes.health.get_settings")
-    def test_hive_metastore_close_called_on_error(
-        self, mock_settings, mock_get_client
-    ):
+    def test_hive_metastore_close_called_on_error(self, mock_settings, mock_get_client):
         """close() is called even when open() fails."""
         mock_client = MagicMock()
         mock_client.open.side_effect = ConnectionError("thrift down")

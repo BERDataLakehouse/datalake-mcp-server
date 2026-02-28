@@ -11,7 +11,7 @@ Tests cover:
 import logging
 import time
 import concurrent.futures
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

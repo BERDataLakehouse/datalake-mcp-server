@@ -14,7 +14,7 @@ Tests cover:
 
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from botocore.exceptions import ClientError

@@ -856,9 +856,7 @@ class TestSettingsNoneFallback:
         with patch(
             "src.delta_lake.data_store.get_settings", return_value=mock_settings
         ):
-            with patch(
-                "src.delta_lake.data_store.get_tables", return_value=["users"]
-            ):
+            with patch("src.delta_lake.data_store.get_tables", return_value=["users"]):
                 result = data_store.table_exists("db", "users", settings=None)
 
         assert result is True
@@ -896,9 +894,7 @@ class TestGetDbStructureViaSparkWithSchema:
 
     def test_via_spark_with_schema(self, mock_spark_session, mock_settings):
         """get_db_structure via Spark with schema calls _get_tables_with_schemas."""
-        spark = mock_spark_session(
-            databases=["db1"], tables={"db1": ["t1"]}
-        )
+        spark = mock_spark_session(databases=["db1"], tables={"db1": ["t1"]})
 
         with patch(
             "src.delta_lake.data_store.get_databases",

@@ -1439,9 +1439,10 @@ class TestGetSparkContext:
                     gen = get_spark_context(req, mock_settings)
                     ctx = next(gen)
 
-                    assert "sharedsparkclustermaster" in ctx.settings_dict[
-                        "SPARK_MASTER_URL"
-                    ]
+                    assert (
+                        "sharedsparkclustermaster"
+                        in ctx.settings_dict["SPARK_MASTER_URL"]
+                    )
 
                     try:
                         next(gen)
@@ -1470,9 +1471,7 @@ class TestGetSparkSessionDeprecatedErrors:
                 side_effect=PermissionError("denied"),
             ):
                 gen = get_spark_session(req, mock_settings)
-                with pytest.raises(
-                    Exception, match="Error reading MinIO credentials"
-                ):
+                with pytest.raises(Exception, match="Error reading MinIO credentials"):
                     next(gen)
 
     def test_spark_connect_fails_falls_back(self, mock_request, mock_settings):
@@ -1513,9 +1512,7 @@ class TestGetSparkSessionDeprecatedErrors:
 
                             assert spark is mock_spark
                             # Second call should be standalone
-                            second_call = (
-                                mock_spark  # returned by side_effect
-                            )
+                            second_call = mock_spark  # returned by side_effect
                             assert second_call is not None
 
                             try:

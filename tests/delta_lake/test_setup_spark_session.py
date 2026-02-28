@@ -1249,9 +1249,7 @@ class TestGetSparkSessionWithRetry:
         def side_effect(**kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
-                raise Exception(
-                    f"[{SESSION_CLOSED_ERRORS[0]}] session was closed"
-                )
+                raise Exception(f"[{SESSION_CLOSED_ERRORS[0]}] session was closed")
             return mock_session
 
         with patch(
@@ -1273,9 +1271,7 @@ class TestGetSparkSessionWithRetry:
 
     def test_raises_after_exhausting_retries(self, test_settings):
         """All retries fail with session error — exception propagated."""
-        session_err = Exception(
-            f"[{SESSION_CLOSED_ERRORS[0]}] session was closed"
-        )
+        session_err = Exception(f"[{SESSION_CLOSED_ERRORS[0]}] session was closed")
 
         with patch(
             "src.delta_lake.setup_spark_session.get_spark_session",
@@ -1313,9 +1309,7 @@ class TestGetSparkSessionWithRetry:
             "src.delta_lake.setup_spark_session.get_spark_session",
             return_value=mock_session,
         ):
-            result = get_spark_session_with_retry(
-                settings=test_settings, max_retries=0
-            )
+            result = get_spark_session_with_retry(settings=test_settings, max_retries=0)
 
         assert result is mock_session
 
