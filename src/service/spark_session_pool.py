@@ -11,7 +11,7 @@ gRPC connection to a remote Spark cluster.
 
 Configuration:
     STANDALONE_SPARK_POOL_SIZE: Number of worker processes (default: 4)
-    STANDALONE_POOL_TIMEOUT: Timeout for pool operations in seconds (default: 300)
+    SPARK_STANDALONE_QUERY_TIMEOUT: Timeout for Standalone-mode queries in seconds (default: 600)
 """
 
 import atexit
@@ -27,8 +27,12 @@ logger = logging.getLogger(__name__)
 # Configurable pool size (default: 4 workers)
 STANDALONE_POOL_SIZE = int(os.getenv("STANDALONE_SPARK_POOL_SIZE", "4"))
 
-# Timeout for pool operations (default: 10 minutes)
-STANDALONE_POOL_TIMEOUT = float(os.getenv("STANDALONE_POOL_TIMEOUT", "600"))
+# Timeout for Standalone-mode queries (applies to entire subprocess lifecycle:
+# session creation + query execution + cleanup). This is the primary timeout for
+# all Standalone-mode operations (sync and async).
+SPARK_STANDALONE_QUERY_TIMEOUT = float(
+    os.getenv("SPARK_STANDALONE_QUERY_TIMEOUT", "600")
+)  # 10 minutes
 
 # Global process pool (lazy initialized)
 _spark_process_pool: ProcessPoolExecutor | None = None
@@ -95,7 +99,7 @@ def run_in_spark_process(
     Args:
         func: Function to execute (must be picklable - no lambdas or closures)
         *args: Positional arguments for the function
-        timeout: Timeout in seconds (default: STANDALONE_POOL_TIMEOUT)
+        timeout: Timeout in seconds (default: SPARK_STANDALONE_QUERY_TIMEOUT)
         operation_name: Name for error messages
         **kwargs: Keyword arguments for the function
 
@@ -121,7 +125,7 @@ def run_in_spark_process(
         count = run_in_spark_process(count_table_in_process, "mydb", "users", settings_dict)
     """
     if timeout is None:
-        timeout = STANDALONE_POOL_TIMEOUT
+        timeout = SPARK_STANDALONE_QUERY_TIMEOUT
 
     pool = _get_pool()
     logger.debug(f"Submitting '{operation_name}' to Spark process pool")
@@ -162,13 +166,13 @@ def get_pool_status() -> dict[str, Any]:
         return {
             "initialized": False,
             "max_workers": STANDALONE_POOL_SIZE,
-            "timeout_seconds": STANDALONE_POOL_TIMEOUT,
+            "timeout_seconds": SPARK_STANDALONE_QUERY_TIMEOUT,
         }
 
     return {
         "initialized": True,
         "max_workers": STANDALONE_POOL_SIZE,
-        "timeout_seconds": STANDALONE_POOL_TIMEOUT,
+        "timeout_seconds": SPARK_STANDALONE_QUERY_TIMEOUT,
         # ProcessPoolExecutor doesn't expose active worker count directly
         # but we can check if it's still running
         "shutdown": getattr(_spark_process_pool, "_shutdown", False),

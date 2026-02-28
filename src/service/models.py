@@ -2,9 +2,15 @@
 Pydantic models for the Spark Manager API.
 """
 
+import os
+from datetime import datetime
+from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
+
+MAX_ASYNC_QUERY_ROWS = int(os.getenv("ASYNC_QUERY_MAX_ROWS", "5000"))
+MAX_CONCURRENT_ASYNC_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_ASYNC_JOBS", "10"))
 
 
 class ErrorResponse(BaseModel):
@@ -384,3 +390,105 @@ class TableSelectResponse(BaseModel):
         Field(description="Query result rows, each as a dictionary"),
     ]
     pagination: Annotated[PaginationInfo, Field(description="Pagination metadata")]
+
+
+# ---
+# Models for Async Query Execution
+# ---
+
+
+class JobStatus(str, Enum):
+    """Status of an async query job."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class JobRecord(BaseModel):
+    """Internal model for tracking async query job state in the S3/MinIO-backed job store."""
+
+    job_id: Annotated[str, Field(description="Unique job identifier (UUID4)")]
+    user: Annotated[str, Field(description="KBase username who submitted the job")]
+    query: Annotated[str, Field(description="SQL query submitted")]
+    status: Annotated[JobStatus, Field(description="Current job status")]
+    limit: Annotated[int, Field(description="Requested row limit")]
+    offset: Annotated[int, Field(description="Requested pagination offset")]
+    created_at: Annotated[datetime, Field(description="Job creation timestamp")]
+    started_at: Annotated[
+        datetime | None, Field(description="When execution started")
+    ] = None
+    completed_at: Annotated[
+        datetime | None, Field(description="When execution completed")
+    ] = None
+    error_message: Annotated[
+        str | None, Field(description="Error details if job failed")
+    ] = None
+    result_path: Annotated[
+        str | None, Field(description="S3 path where results are stored")
+    ] = None
+    row_count: Annotated[
+        int | None, Field(description="Number of rows in the result")
+    ] = None
+    total_count: Annotated[
+        int | None, Field(description="Total matching rows (for pagination)")
+    ] = None
+    has_more: Annotated[
+        bool | None, Field(description="Whether more rows are available")
+    ] = None
+
+
+class AsyncQuerySubmitRequest(BaseModel):
+    """Request model for submitting an async query."""
+
+    query: Annotated[
+        str, Field(description="SQL query to execute against Delta tables")
+    ]
+    limit: Annotated[
+        int,
+        Field(
+            description="Maximum number of rows to return",
+            gt=0,
+            le=MAX_ASYNC_QUERY_ROWS,
+        ),
+    ] = 1000
+    offset: Annotated[
+        int,
+        Field(
+            description=(
+                "Number of rows to skip for pagination. "
+                "Requires ORDER BY in query for deterministic results."
+            ),
+            ge=0,
+        ),
+    ] = 0
+
+
+class AsyncQuerySubmitResponse(BaseModel):
+    """Response model for async query submission."""
+
+    job_id: Annotated[str, Field(description="Unique identifier for the submitted job")]
+
+
+class AsyncQueryStatusResponse(BaseModel):
+    """Response model for async query job status."""
+
+    job_id: Annotated[str, Field(description="Unique job identifier")]
+    status: Annotated[JobStatus, Field(description="Current job status")]
+    query: Annotated[str, Field(description="SQL query that was submitted")]
+    limit: Annotated[int, Field(description="Requested row limit")]
+    offset: Annotated[int, Field(description="Requested pagination offset")]
+    created_at: Annotated[datetime, Field(description="Job creation timestamp")]
+    started_at: Annotated[
+        datetime | None, Field(description="When execution started")
+    ] = None
+    completed_at: Annotated[
+        datetime | None, Field(description="When execution completed")
+    ] = None
+    error_message: Annotated[
+        str | None, Field(description="Error details if job failed")
+    ] = None
+    row_count: Annotated[
+        int | None, Field(description="Number of rows in the result")
+    ] = None

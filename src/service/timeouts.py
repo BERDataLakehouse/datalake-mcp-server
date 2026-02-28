@@ -19,11 +19,11 @@ from src.service.exceptions import SparkTimeoutError
 
 logger = logging.getLogger(__name__)
 
-# Default timeout values (in seconds)
-DEFAULT_SPARK_QUERY_TIMEOUT = int(os.getenv("SPARK_QUERY_TIMEOUT", "300"))  # 5 minutes
-DEFAULT_SPARK_COLLECT_TIMEOUT = int(
-    os.getenv("SPARK_COLLECT_TIMEOUT", "120")
-)  # 2 minutes
+# Timeout for Spark Connect mode queries (applies to df.collect() calls).
+# This is the primary timeout for all Connect-mode operations (sync and async).
+SPARK_CONNECT_QUERY_TIMEOUT = int(
+    os.getenv("SPARK_CONNECT_QUERY_TIMEOUT", "600")
+)  # 10 minutes
 
 # Thread pool for timeout execution
 # Using a modest pool size since Spark operations are already parallelized
@@ -53,7 +53,7 @@ def with_timeout(
     Decorator to add timeout to a function.
 
     Args:
-        timeout_seconds: Maximum execution time in seconds. If None, uses DEFAULT_SPARK_QUERY_TIMEOUT
+        timeout_seconds: Maximum execution time in seconds. If None, uses SPARK_CONNECT_QUERY_TIMEOUT
         operation_name: Name of the operation for error messages
 
     Returns:
@@ -65,7 +65,7 @@ def with_timeout(
             return spark.sql("SELECT * FROM large_table").collect()
     """
     if timeout_seconds is None:
-        timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
+        timeout_seconds = SPARK_CONNECT_QUERY_TIMEOUT
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
 
@@ -134,7 +134,7 @@ def run_with_timeout(
     if kwargs is None:
         kwargs = {}
     if timeout_seconds is None:
-        timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
+        timeout_seconds = SPARK_CONNECT_QUERY_TIMEOUT
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
 
@@ -177,7 +177,7 @@ def spark_operation_timeout(
     For hard timeouts, use run_with_timeout() or @with_timeout decorator.
 
     Args:
-        timeout_seconds: Threshold for warning (defaults to DEFAULT_SPARK_QUERY_TIMEOUT)
+        timeout_seconds: Threshold for warning (defaults to SPARK_CONNECT_QUERY_TIMEOUT)
         operation_name: Name of the operation for logging
 
     Example:
@@ -186,7 +186,7 @@ def spark_operation_timeout(
     """
 
     if timeout_seconds is None:
-        timeout_seconds = DEFAULT_SPARK_QUERY_TIMEOUT
+        timeout_seconds = SPARK_CONNECT_QUERY_TIMEOUT
 
     start = time.time()
     try:

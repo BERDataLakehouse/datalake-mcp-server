@@ -128,3 +128,33 @@ class SparkTimeoutError(SparkOperationError):
                 f"Spark operation '{operation}' timed out after {timeout} seconds. "
                 f"Consider using pagination or reducing the query scope."
             )
+
+
+class AsyncQueryError(MCPServerError):
+    """
+    Base class for async query related errors.
+    """
+
+
+class JobNotFoundError(AsyncQueryError):
+    """
+    An error thrown when a job_id does not exist.
+    """
+
+
+class JobNotReadyError(AsyncQueryError):
+    """
+    An error thrown when results are requested before a job has completed.
+    """
+
+
+class JobAccessDeniedError(AsyncQueryError):
+    """
+    An error thrown when a user tries to access another user's job.
+    """
+
+
+class TooManyJobsError(AsyncQueryError):
+    """
+    An error thrown when a user has too many concurrent async jobs.
+    """

@@ -12,16 +12,22 @@ Tests cover:
 
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch, mock_open
 
+import grpc
 import pytest
 
 from src.service.dependencies import (
+    SparkContext,
     read_user_minio_credentials,
+    get_token_from_request,
     get_user_from_request,
     construct_user_spark_connect_url,
     is_spark_connect_reachable,
+    get_spark_context,
     get_spark_session,
     sanitize_k8s_name,
     DEFAULT_SPARK_POOL,
@@ -316,9 +322,11 @@ class TestConstructUserSparkConnectUrl:
             with patch.dict("os.environ", {"K8S_ENVIRONMENT": "dev"}, clear=False):
                 with patch(
                     "os.getenv",
-                    side_effect=lambda k, d=None: None
-                    if k == "SPARK_CONNECT_URL_TEMPLATE"
-                    else ("dev" if k == "K8S_ENVIRONMENT" else d),
+                    side_effect=lambda k, d=None: (
+                        None
+                        if k == "SPARK_CONNECT_URL_TEMPLATE"
+                        else ("dev" if k == "K8S_ENVIRONMENT" else d)
+                    ),
                 ):
                     url = construct_user_spark_connect_url("myuser")
 
@@ -329,9 +337,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL construction with prod environment."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("prod" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("prod" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("produser")
 
@@ -346,9 +356,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that Kubernetes URL sanitizes usernames with underscores."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("tian_gu_test")
 
@@ -359,9 +371,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that Kubernetes URL sanitizes mixed-case usernames."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("Jeff_Cohere")
 
@@ -372,9 +386,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that DNS-compliant usernames are preserved as-is."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("tgu2")
 
@@ -385,9 +401,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL with prod environment and username sanitization."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("prod" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("prod" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("user_name_test")
 
@@ -397,9 +415,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL with stage environment and username sanitization."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("stage" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("stage" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("test_user")
 
@@ -464,8 +484,6 @@ class TestIsSparkConnectReachable:
 
     def test_grpc_timeout_returns_false(self):
         """Test that gRPC timeout returns False even if TCP check passes."""
-        import grpc
-
         with (
             patch("socket.socket") as mock_socket_class,
             patch("src.service.dependencies.grpc") as mock_grpc,
@@ -770,51 +788,87 @@ class TestConcurrentSparkSessions:
     def test_concurrent_session_creation(
         self, mock_request, mock_settings, concurrent_executor
     ):
-        """Test that multiple concurrent requests get isolated sessions."""
-        sessions_created = {"count": 0}
+        """Test that multiple concurrent requests get isolated sessions.
 
+        Uses side_effects instead of per-thread patching to avoid race conditions
+        in ThreadPoolExecutor.
+        """
+        sessions_created = {"count": 0}
+        lock = threading.Lock()
+
+        # Dynamic side effects to handle per-thread logic without patching inside threads
+        def get_user_side_effect(request):
+            # Extract user from the request object passed by create_session
+            # We'll attach a custom attribute _test_user to the mock request
+            return getattr(request, "_test_user", "unknown")
+
+        def get_spark_side_effect(app_name=None, settings=None, **kwargs):
+            # Create a unique mock spark session for each user
+            mock_spark = MagicMock()
+            # Extract user ID from app_name or settings to simulate isolation
+            if app_name and "user_" in app_name:
+                parts = app_name.split("_")
+                for part in parts:
+                    if part.isdigit():
+                        mock_spark.user_id = int(part)
+                        break
+
+            # Also support extraction from settings if needed
+            if settings and hasattr(settings, "USER"):
+                if "user_" in settings.USER:
+                    try:
+                        mock_spark.user_id = int(settings.USER.split("_")[1])
+                    except (IndexError, ValueError):
+                        pass
+
+            with lock:
+                sessions_created["count"] += 1
+            return mock_spark
+
+        # Helper function run in threads - NO PATCHING HERE
         def create_session(user_id):
             mock_req = MagicMock()
             mock_req.state._request_state = MagicMock()
+            # Attach user info to request so get_user_side_effect can find it
+            mock_req._test_user = f"user_{user_id}"
 
+            gen = get_spark_session(mock_req, mock_settings)
+            spark = next(gen)
+
+            # Get the user_id we stashed on the mock
+            spark_id = getattr(spark, "user_id", -1)
+
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+
+            return spark_id
+
+        # Apply patches GLOBALLY
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            side_effect=get_user_side_effect,
+        ):
             with patch(
-                "src.service.dependencies.get_user_from_request",
-                return_value=f"user_{user_id}",
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
             ):
                 with patch(
-                    "src.service.dependencies.read_user_minio_credentials",
-                    return_value=("access", "secret"),
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    return_value=True,
                 ):
                     with patch(
-                        "src.service.dependencies.is_spark_connect_reachable",
-                        return_value=True,
+                        "src.service.dependencies._get_spark_session",
+                        side_effect=get_spark_side_effect,
                     ):
-                        with patch(
-                            "src.service.dependencies._get_spark_session"
-                        ) as mock_get_spark:
-                            mock_spark = MagicMock()
-                            mock_spark.user_id = user_id
-                            mock_get_spark.return_value = mock_spark
-                            sessions_created["count"] += 1
+                        args_list = [(i,) for i in range(5)]
+                        results, exceptions = concurrent_executor(
+                            create_session, args_list, max_workers=5
+                        )
 
-                            gen = get_spark_session(mock_req, mock_settings)
-                            spark = next(gen)
-                            spark_id = spark.user_id
-
-                            try:
-                                next(gen)
-                            except StopIteration:
-                                pass
-
-                            return spark_id
-
-        args_list = [(i,) for i in range(5)]
-        results, exceptions = concurrent_executor(
-            create_session, args_list, max_workers=5
-        )
-
-        assert len(exceptions) == 0
-        # Each user should get their own session
+        assert len(exceptions) == 0, f"Encountered exceptions: {exceptions}"
+        # Each user should get their own session corresponding to their ID
         assert sorted(results) == [0, 1, 2, 3, 4]
 
     def test_connect_mode_acquires_lock_during_creation(
@@ -825,9 +879,6 @@ class TestConcurrentSparkSessions:
         Verifies the lock is acquired by checking that concurrent Connect creations
         don't overlap (they should be serialized).
         """
-        import threading
-        import time
-
         mock_request_obj = mock_request(user="testuser")
         creation_events = {"count": 0, "max_concurrent": 0, "current": 0}
         lock = threading.Lock()
@@ -881,8 +932,6 @@ class TestConcurrentSparkSessions:
 
         Verifies the lock prevents other requests from starting while one is active.
         """
-        import threading
-
         mock_request_obj = mock_request(user="testuser")
         lifecycle_events = []
         events_lock = threading.Lock()
@@ -937,9 +986,6 @@ class TestConcurrentSparkSessions:
 
         This test verifies that concurrent requests complete successfully.
         """
-        import threading
-        import time
-
         creation_tracking = {"created": 0}
         tracking_lock = threading.Lock()
 
@@ -1047,7 +1093,6 @@ class TestGetTokenFromRequest:
 
     def test_extracts_bearer_token(self):
         """Test successful extraction of Bearer token."""
-        from src.service.dependencies import get_token_from_request
 
         request = MagicMock()
         request.headers.get.return_value = "Bearer test-token-123"
@@ -1058,7 +1103,6 @@ class TestGetTokenFromRequest:
 
     def test_returns_none_for_missing_header(self):
         """Test that missing Authorization header returns None."""
-        from src.service.dependencies import get_token_from_request
 
         request = MagicMock()
         request.headers.get.return_value = ""
@@ -1069,7 +1113,6 @@ class TestGetTokenFromRequest:
 
     def test_returns_none_for_non_bearer_auth(self):
         """Test that non-Bearer auth returns None."""
-        from src.service.dependencies import get_token_from_request
 
         request = MagicMock()
         request.headers.get.return_value = "Basic dXNlcjpwYXNz"
@@ -1089,7 +1132,6 @@ class TestSparkContextDataclass:
 
     def test_default_values(self):
         """Test SparkContext with default values."""
-        from src.service.dependencies import SparkContext
 
         ctx = SparkContext()
 
@@ -1102,7 +1144,6 @@ class TestSparkContextDataclass:
 
     def test_custom_values(self):
         """Test SparkContext with custom values."""
-        from src.service.dependencies import SparkContext
 
         mock_spark = MagicMock()
         ctx = SparkContext(
@@ -1126,7 +1167,466 @@ class TestSparkContextDataclass:
 # get_spark_context Tests
 # =============================================================================
 
-# Note: Testing get_spark_context requires complex fixture setup since it depends
-# on read_user_minio_credentials reading from filesystem. The function is exercised
-# by the route integration tests in test_delta.py which mock the dependency at
-# the route level. Additional unit tests for get_spark_context are deferred.
+
+class TestGetSparkContext:
+    """Tests for the get_spark_context dependency generator."""
+
+    def _base_patches(self):
+        """Convenience: return a dict of the common patches for get_spark_context."""
+        return {
+            "get_user": patch(
+                "src.service.dependencies.get_user_from_request",
+                return_value="testuser",
+            ),
+            "get_token": patch(
+                "src.service.dependencies.get_token_from_request",
+                return_value="tok-123",
+            ),
+            "creds": patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ),
+            "url": patch(
+                "src.service.dependencies.construct_user_spark_connect_url",
+                return_value="sc://jupyter-testuser:15002",
+            ),
+        }
+
+    # ---- Spark Connect happy path ----
+
+    def test_spark_connect_returns_context_with_session(
+        self, mock_request, mock_settings
+    ):
+        """get_spark_context yields a SparkContext with spark session in Connect mode."""
+        req = mock_request(user="testuser")
+        mock_spark = MagicMock()
+        mock_spark.version = "3.5.0"
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies._get_spark_session_with_retry",
+                    return_value=mock_spark,
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    ctx = next(gen)
+
+                    assert isinstance(ctx, SparkContext)
+                    assert ctx.spark is mock_spark
+                    assert ctx.is_standalone_subprocess is False
+                    assert ctx.username == "testuser"
+                    assert ctx.auth_token == "tok-123"
+                    assert "SPARK_CONNECT_URL" in ctx.settings_dict
+
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+
+    # ---- Fallback: Connect unreachable → Standalone ----
+
+    def test_standalone_when_connect_unreachable(self, mock_request, mock_settings):
+        """When Spark Connect is unreachable, yield Standalone context (no session)."""
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=False,
+            ):
+                gen = get_spark_context(req, mock_settings)
+                ctx = next(gen)
+
+                assert ctx.spark is None
+                assert ctx.is_standalone_subprocess is True
+                assert ctx.username == "testuser"
+                assert "SPARK_MASTER_URL" in ctx.settings_dict
+
+                try:
+                    next(gen)
+                except StopIteration:
+                    pass
+
+    # ---- Fallback: Connect session creation fails ----
+
+    def test_fallback_when_connect_session_fails(self, mock_request, mock_settings):
+        """Connect reachable but session creation fails → fall back to Standalone."""
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies._get_spark_session_with_retry",
+                    side_effect=ConnectionError("gRPC failed"),
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    ctx = next(gen)
+
+                    assert ctx.spark is None
+                    assert ctx.is_standalone_subprocess is True
+
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+
+    # ---- Connect: session validation fails → fall back ----
+
+    def test_fallback_when_session_validation_fails(self, mock_request, mock_settings):
+        """Connect session created but spark.version call fails → Standalone fallback."""
+        req = mock_request(user="testuser")
+        mock_spark = MagicMock()
+        type(mock_spark).version = property(
+            lambda self: (_ for _ in ()).throw(Exception("channel closed"))
+        )
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies._get_spark_session_with_retry",
+                    return_value=mock_spark,
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    ctx = next(gen)
+
+                    assert ctx.is_standalone_subprocess is True
+
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+
+    # ---- Credential errors ----
+
+    def test_file_not_found_credentials(self, mock_request, mock_settings):
+        """Missing credentials file raises with helpful message."""
+        req = mock_request(user="testuser")
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.get_token_from_request",
+                return_value=None,
+            ):
+                with patch(
+                    "src.service.dependencies.read_user_minio_credentials",
+                    side_effect=FileNotFoundError("not found"),
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    with pytest.raises(
+                        Exception, match="MinIO credentials file not found"
+                    ):
+                        next(gen)
+
+    def test_generic_credential_error(self, mock_request, mock_settings):
+        """Non-FileNotFoundError credential failure propagates."""
+        req = mock_request(user="testuser")
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.get_token_from_request",
+                return_value=None,
+            ):
+                with patch(
+                    "src.service.dependencies.read_user_minio_credentials",
+                    side_effect=PermissionError("denied"),
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    with pytest.raises(
+                        Exception, match="Error reading MinIO credentials"
+                    ):
+                        next(gen)
+
+    # ---- Standalone: BERDL_POD_IP fallback ----
+
+    def test_standalone_pod_ip_fallback(self, mock_request, mock_settings):
+        """When BERDL_POD_IP is empty, standalone fills in 0.0.0.0."""
+        req = mock_request(user="testuser")
+        mock_settings.BERDL_POD_IP = ""
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=False,
+            ):
+                gen = get_spark_context(req, mock_settings)
+                ctx = next(gen)
+
+                assert ctx.settings_dict["BERDL_POD_IP"] == "0.0.0.0"
+
+                try:
+                    next(gen)
+                except StopIteration:
+                    pass
+
+    def test_token_extraction_exception_swallowed(self, mock_request, mock_settings):
+        """get_token_from_request failure is swallowed (line 395-397)."""
+        req = mock_request(user="testuser")
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.get_token_from_request",
+                side_effect=Exception("header parse error"),
+            ):
+                with patch(
+                    "src.service.dependencies.read_user_minio_credentials",
+                    return_value=("access", "secret"),
+                ):
+                    with patch(
+                        "src.service.dependencies.construct_user_spark_connect_url",
+                        return_value="sc://jupyter-testuser:15002",
+                    ):
+                        with patch(
+                            "src.service.dependencies.is_spark_connect_reachable",
+                            return_value=False,
+                        ):
+                            gen = get_spark_context(req, mock_settings)
+                            ctx = next(gen)
+
+                            assert ctx.auth_token is None
+
+                            try:
+                                next(gen)
+                            except StopIteration:
+                                pass
+
+    def test_connect_mode_pod_ip_fallback(self, mock_request, mock_settings):
+        """Connect mode fills in BERDL_POD_IP when empty (line 519)."""
+        req = mock_request(user="testuser")
+        mock_settings.BERDL_POD_IP = ""
+        mock_spark = MagicMock()
+        mock_spark.version = "3.5.0"
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies._get_spark_session_with_retry",
+                    return_value=mock_spark,
+                ):
+                    gen = get_spark_context(req, mock_settings)
+                    ctx = next(gen)
+
+                    assert ctx.settings_dict["BERDL_POD_IP"] == "0.0.0.0"
+
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+
+    def test_standalone_empty_master_urls(self, mock_request, mock_settings):
+        """Empty SHARED_SPARK_MASTER_URL uses default in get_spark_context (line 574)."""
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=False,
+            ):
+                with patch.dict("os.environ", {"SHARED_SPARK_MASTER_URL": "  "}):
+                    gen = get_spark_context(req, mock_settings)
+                    ctx = next(gen)
+
+                    assert (
+                        "sharedsparkclustermaster"
+                        in ctx.settings_dict["SPARK_MASTER_URL"]
+                    )
+
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+
+
+# =============================================================================
+# get_spark_session (deprecated) — additional error branches
+# =============================================================================
+
+
+class TestGetSparkSessionDeprecatedErrors:
+    """Cover uncovered error branches in the deprecated get_spark_session."""
+
+    def test_generic_credential_error(self, mock_request, mock_settings):
+        """Non-FileNotFoundError credential failure (line 642-643)."""
+        req = mock_request(user="testuser")
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                side_effect=PermissionError("denied"),
+            ):
+                gen = get_spark_session(req, mock_settings)
+                with pytest.raises(Exception, match="Error reading MinIO credentials"):
+                    next(gen)
+
+    def test_spark_connect_fails_falls_back(self, mock_request, mock_settings):
+        """Spark Connect session creation failure falls back to standalone (line 684-689)."""
+        req = mock_request(user="testuser")
+        mock_spark = MagicMock()
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.construct_user_spark_connect_url",
+                    return_value="sc://jupyter-testuser:15002",
+                ):
+                    with patch(
+                        "src.service.dependencies.is_spark_connect_reachable",
+                        return_value=True,
+                    ):
+                        call_count = {"n": 0}
+
+                        def create_side_effect(*a, **kw):
+                            call_count["n"] += 1
+                            if call_count["n"] == 1:
+                                raise RuntimeError("Connect failed")
+                            return mock_spark
+
+                        with patch(
+                            "src.service.dependencies._get_spark_session",
+                            side_effect=create_side_effect,
+                        ):
+                            gen = get_spark_session(req, mock_settings)
+                            spark = next(gen)
+
+                            assert spark is mock_spark
+                            # Second call should be standalone
+                            second_call = mock_spark  # returned by side_effect
+                            assert second_call is not None
+
+                            try:
+                                next(gen)
+                            except StopIteration:
+                                pass
+
+    def test_empty_master_urls_fallback(self, mock_request, mock_settings):
+        """Empty SHARED_SPARK_MASTER_URL uses default (line 699)."""
+        req = mock_request(user="testuser")
+        mock_spark = MagicMock()
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    return_value=False,
+                ):
+                    with patch.dict(
+                        "os.environ",
+                        {"SHARED_SPARK_MASTER_URL": "   "},
+                    ):
+                        with patch(
+                            "src.service.dependencies._get_spark_session",
+                            return_value=mock_spark,
+                        ):
+                            gen = get_spark_session(req, mock_settings)
+                            spark = next(gen)
+                            assert spark is mock_spark
+
+                            try:
+                                next(gen)
+                            except StopIteration:
+                                pass
+
+    def test_missing_pod_ip_filled(self, mock_request, mock_settings):
+        """When BERDL_POD_IP is falsy, it's set to 0.0.0.0 (line 705)."""
+        req = mock_request(user="testuser")
+        mock_settings.BERDL_POD_IP = ""
+        mock_spark = MagicMock()
+
+        with patch(
+            "src.service.dependencies.get_user_from_request",
+            return_value="testuser",
+        ):
+            with patch(
+                "src.service.dependencies.read_user_minio_credentials",
+                return_value=("access", "secret"),
+            ):
+                with patch(
+                    "src.service.dependencies.is_spark_connect_reachable",
+                    return_value=False,
+                ):
+                    with patch(
+                        "src.service.dependencies._get_spark_session",
+                        return_value=mock_spark,
+                    ) as mock_create:
+                        gen = get_spark_session(req, mock_settings)
+                        next(gen)
+
+                        call_kwargs = mock_create.call_args[1]
+                        settings_obj = call_kwargs["settings"]
+                        assert settings_obj.BERDL_POD_IP == "0.0.0.0"
+
+                        try:
+                            next(gen)
+                        except StopIteration:
+                            pass
+
+
+# =============================================================================
+# is_spark_connect_reachable — gRPC non-timeout exception (lines 327-329)
+# =============================================================================
+
+
+class TestIsSparkConnectReachableGrpcError:
+    """Cover the non-FutureTimeoutError gRPC exception branch."""
+
+    def test_grpc_non_timeout_exception(self):
+        """gRPC channel_ready_future raises a non-timeout exception (line 327-329)."""
+        with patch("socket.socket") as mock_socket_class:
+            mock_sock = MagicMock()
+            mock_sock.connect_ex.return_value = 0
+            mock_socket_class.return_value = mock_sock
+
+            with patch("src.service.dependencies.grpc") as mock_grpc:
+                mock_channel = MagicMock()
+                mock_grpc.insecure_channel.return_value = mock_channel
+                mock_future = MagicMock()
+                mock_future.result.side_effect = RuntimeError("unexpected gRPC error")
+                mock_grpc.channel_ready_future.return_value = mock_future
+                mock_grpc.FutureTimeoutError = grpc.FutureTimeoutError
+
+                result = is_spark_connect_reachable("sc://localhost:15002")
+
+        assert result is False
+        mock_channel.close.assert_called_once()

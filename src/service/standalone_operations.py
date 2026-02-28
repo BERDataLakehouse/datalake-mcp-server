@@ -201,6 +201,7 @@ def query_table_subprocess(
     offset: int = 0,
     username: str | None = None,
     app_name: str = "mcp_query",
+    max_rows: int = 1000,
 ) -> dict[str, Any]:
     """
     Execute a SQL query against Delta tables (subprocess version).
@@ -212,6 +213,7 @@ def query_table_subprocess(
         offset: Pagination offset
         username: Username for cache isolation
         app_name: Spark application name
+        max_rows: Maximum allowed row limit (default 1000, async uses 5000)
 
     Returns:
         Dict with 'result' (list of rows) and 'pagination' (dict)
@@ -225,6 +227,7 @@ def query_table_subprocess(
             limit=limit,
             offset=offset,
             username=username,
+            max_rows=max_rows,
         )
         # Convert Pydantic model to dict for serialization
         return {

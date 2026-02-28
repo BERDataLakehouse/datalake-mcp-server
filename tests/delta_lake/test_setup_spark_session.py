@@ -30,8 +30,12 @@ from src.delta_lake.setup_spark_session import (
     _filter_immutable_spark_connect_configs,
     _set_scheduler_pool,
     _clear_spark_env_for_mode_switch,
+    _clear_stale_spark_connect_sessions,
+    _is_session_error,
+    SESSION_CLOSED_ERRORS,
     generate_spark_conf,
     get_spark_session,
+    get_spark_session_with_retry,
     SPARK_DEFAULT_POOL,
     SPARK_POOLS,
     EXECUTOR_MEMORY_OVERHEAD,
@@ -1081,3 +1085,247 @@ class TestConfigIntegration:
         # Should not have cluster configs
         assert "spark.executor.instances" not in config
         assert "spark.hadoop.fs.s3a.endpoint" not in config
+
+
+# =============================================================================
+# Test convert_memory_format — small values (lines 136-141)
+# =============================================================================
+
+
+class TestConvertMemoryFormatSmallValues:
+    """Cover kilobyte and raw-byte output branches."""
+
+    def test_small_kib_value_outputs_k_unit(self):
+        """Memory in the KiB range should produce 'k' Spark unit (line 136-138)."""
+        # 512 bytes with 0% overhead → 512 bytes → < 1024 → raw bytes branch
+        # Actually let's do 2KiB with 0% overhead → 2048 bytes → >=1024 → "k" branch
+        result = convert_memory_format("2KiB", overhead_percentage=0.0)
+        assert result == "2k"
+
+    def test_overhead_pushes_below_kib(self):
+        """Overhead can push a KiB value into raw bytes territory (line 139-141)."""
+        # 1KiB = 1024 bytes, 50% overhead → 512 bytes → raw bytes branch
+        result = convert_memory_format("1KiB", overhead_percentage=0.5)
+        assert result == "512"
+
+
+# =============================================================================
+# Test _clear_stale_spark_connect_sessions (lines 426-463)
+# =============================================================================
+
+
+class TestClearStaleSparkConnectSessions:
+    """Tests for clearing cached Connect sessions."""
+
+    def test_clears_active_session(self):
+        """Cover lines 426-437: active session is present and cleared."""
+        mock_old_session = MagicMock()
+        mock_old_session.session_id = "stale-uuid-active"
+
+        mock_active_session = MagicMock()
+        mock_active_session.session = mock_old_session
+
+        with patch(
+            "src.delta_lake.setup_spark_session.RemoteSparkSession"
+        ) as mock_remote:
+            mock_remote._lock = MagicMock()
+            mock_remote._lock.__enter__ = MagicMock(return_value=None)
+            mock_remote._lock.__exit__ = MagicMock(return_value=False)
+            mock_remote._active_session = mock_active_session
+            mock_remote._default_session = None
+
+            _clear_stale_spark_connect_sessions()
+
+            assert mock_active_session.session is None
+
+    def test_clears_default_session(self):
+        """Cover lines 441-450: default session is present and cleared."""
+        mock_default = MagicMock()
+        mock_default.session_id = "stale-uuid-default"
+
+        mock_active = MagicMock(spec=[])  # no "session" attribute
+
+        with patch(
+            "src.delta_lake.setup_spark_session.RemoteSparkSession"
+        ) as mock_remote:
+            mock_remote._lock = MagicMock()
+            mock_remote._lock.__enter__ = MagicMock(return_value=None)
+            mock_remote._lock.__exit__ = MagicMock(return_value=False)
+            mock_remote._active_session = mock_active
+            mock_remote._default_session = mock_default
+
+            _clear_stale_spark_connect_sessions()
+
+            assert mock_remote._default_session is None
+
+    def test_clears_both_sessions(self):
+        """Cover line 454: both active and default sessions cleared."""
+        mock_old_session = MagicMock()
+        mock_old_session.session_id = "active-uuid"
+
+        mock_active = MagicMock()
+        mock_active.session = mock_old_session
+
+        mock_default = MagicMock()
+        mock_default.session_id = "default-uuid"
+
+        with patch(
+            "src.delta_lake.setup_spark_session.RemoteSparkSession"
+        ) as mock_remote:
+            mock_remote._lock = MagicMock()
+            mock_remote._lock.__enter__ = MagicMock(return_value=None)
+            mock_remote._lock.__exit__ = MagicMock(return_value=False)
+            mock_remote._active_session = mock_active
+            mock_remote._default_session = mock_default
+
+            _clear_stale_spark_connect_sessions()
+
+            assert mock_active.session is None
+            assert mock_remote._default_session is None
+
+    def test_exception_swallowed(self):
+        """Cover lines 460-463: exception during cache clearing is logged, not raised."""
+        with patch(
+            "src.delta_lake.setup_spark_session.RemoteSparkSession"
+        ) as mock_remote:
+            mock_remote._lock = MagicMock()
+            mock_remote._lock.__enter__ = MagicMock(
+                side_effect=RuntimeError("lock poisoned")
+            )
+
+            # Should not raise
+            _clear_stale_spark_connect_sessions()
+
+
+# =============================================================================
+# Test _is_session_error (lines 481-482)
+# =============================================================================
+
+
+class TestIsSessionError:
+    """Tests for session error detection."""
+
+    def test_detects_session_closed_error(self):
+        for error_code in SESSION_CLOSED_ERRORS:
+            err = Exception(f"SparkConnectGrpcException: [{error_code}]")
+            assert _is_session_error(err) is True
+
+    def test_rejects_unrelated_error(self):
+        assert _is_session_error(ValueError("division by zero")) is False
+
+    def test_rejects_partial_match(self):
+        assert _is_session_error(Exception("INVALID_HANDLE")) is False
+
+
+# =============================================================================
+# Test get_spark_session_with_retry (lines 737-804)
+# =============================================================================
+
+
+class TestGetSparkSessionWithRetry:
+    """Tests for the retry wrapper around get_spark_session."""
+
+    def test_success_on_first_attempt(self, test_settings):
+        """First attempt succeeds — no retries needed."""
+        mock_session = MagicMock()
+
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            return_value=mock_session,
+        ):
+            result = get_spark_session_with_retry(
+                app_name="TestRetry",
+                settings=test_settings,
+                max_retries=2,
+            )
+
+        assert result is mock_session
+
+    def test_retries_on_session_closed_error(self, test_settings):
+        """Session error triggers retry, second attempt succeeds."""
+        mock_session = MagicMock()
+        calls = {"count": 0}
+
+        def side_effect(**kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise Exception(f"[{SESSION_CLOSED_ERRORS[0]}] session was closed")
+            return mock_session
+
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            side_effect=side_effect,
+        ):
+            with patch(
+                "src.delta_lake.setup_spark_session._clear_stale_spark_connect_sessions"
+            ):
+                with patch("time.sleep"):
+                    result = get_spark_session_with_retry(
+                        app_name="RetryTest",
+                        settings=test_settings,
+                        max_retries=2,
+                    )
+
+        assert result is mock_session
+        assert calls["count"] == 2
+
+    def test_raises_after_exhausting_retries(self, test_settings):
+        """All retries fail with session error — exception propagated."""
+        session_err = Exception(f"[{SESSION_CLOSED_ERRORS[0]}] session was closed")
+
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            side_effect=session_err,
+        ):
+            with patch(
+                "src.delta_lake.setup_spark_session._clear_stale_spark_connect_sessions"
+            ):
+                with patch("time.sleep"):
+                    with pytest.raises(Exception, match="session was closed"):
+                        get_spark_session_with_retry(
+                            app_name="ExhaustRetry",
+                            settings=test_settings,
+                            max_retries=1,
+                        )
+
+    def test_non_session_error_raises_immediately(self, test_settings):
+        """Non-session errors are raised without retry."""
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            side_effect=ConnectionError("network down"),
+        ):
+            with pytest.raises(ConnectionError, match="network down"):
+                get_spark_session_with_retry(
+                    app_name="NoRetry",
+                    settings=test_settings,
+                    max_retries=3,
+                )
+
+    def test_username_from_settings(self, test_settings):
+        """Username is extracted from settings for logging."""
+        mock_session = MagicMock()
+
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            return_value=mock_session,
+        ):
+            result = get_spark_session_with_retry(settings=test_settings, max_retries=0)
+
+        assert result is mock_session
+
+    def test_username_unknown_without_settings(self):
+        """Username defaults to 'unknown' when settings is None."""
+        mock_session = MagicMock()
+
+        with patch(
+            "src.delta_lake.setup_spark_session.get_spark_session",
+            return_value=mock_session,
+        ):
+            result = get_spark_session_with_retry(
+                app_name="NoSettings",
+                local=True,
+                settings=None,
+                max_retries=0,
+            )
+
+        assert result is mock_session

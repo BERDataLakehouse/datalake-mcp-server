@@ -14,7 +14,8 @@ from fastapi.security.utils import get_authorization_scheme_param
 from fastapi_mcp import FastApiMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.routes import delta, health
+from src.routes import async_query, delta, health
+from src.async_query.executor import AsyncQueryExecutor
 from src.service import app_state
 from src.service.config import configure_logging, get_settings
 from src.service.stateless_http_transport import mount_stateless_mcp
@@ -182,6 +183,7 @@ def create_application() -> FastAPI:
     # Include routers
     app.include_router(health.router)
     app.include_router(delta.router)
+    app.include_router(async_query.router)
 
     # MCP Server Integration with STATELESS HTTP transport for horizontal scaling
     # This enables true horizontal pod scaling in Kubernetes without sticky sessions
@@ -202,10 +204,12 @@ def create_application() -> FastAPI:
     async def startup_event():
         logger.info("Starting application")
         await app_state.build_app(app)
+        app.state.async_query_executor = AsyncQueryExecutor()
         logger.info("Application started")
 
     async def shutdown_event():
         logger.info("Shutting down application")
+        await app.state.async_query_executor.shutdown()
         await mcp_transport.shutdown()
         await app_state.destroy_app_state(app)
         logger.info("Application shut down")

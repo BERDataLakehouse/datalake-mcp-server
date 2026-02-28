@@ -20,7 +20,7 @@ from src.service.exceptions import (
     SparkQueryError,
     SparkTimeoutError,
 )
-from src.service.timeouts import run_with_timeout, DEFAULT_SPARK_COLLECT_TIMEOUT
+from src.service.timeouts import run_with_timeout, SPARK_CONNECT_QUERY_TIMEOUT
 from src.service.models import (
     AggregationSpec,
     ColumnSpec,
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 # Row limits to prevent OOM and ensure service stability
 MAX_SAMPLE_ROWS = 100
 MAX_QUERY_ROWS = 1000  # Maximum rows returned by arbitrary SQL queries
-MAX_SELECT_ROWS = 1000  # Maximum rows for structured SELECT (enforced in model)
 CACHE_EXPIRY_SECONDS = 3600  # Cache results for 1 hour by default
 
 # Common SQL keywords that might indicate destructive operations
@@ -94,25 +93,6 @@ FORBIDDEN_POSTGRESQL_SCHEMAS = {
 }
 
 
-def _extract_limit_from_query(query: str) -> Optional[int]:
-    """
-    Extract the LIMIT value from a SQL query if present.
-
-    Args:
-        query: SQL query string
-
-    Returns:
-        The LIMIT value as int, or None if no LIMIT clause found
-    """
-    # Simple regex to find LIMIT clause - handles most common cases
-    # Pattern matches: LIMIT <number> with optional whitespace
-    limit_pattern = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
-    match = limit_pattern.search(query)
-    if match:
-        return int(match.group(1))
-    return None
-
-
 def _is_non_paginatable_query(query: str) -> bool:
     """
     Check if a SQL query is a metadata command that doesn't support LIMIT/OFFSET.
@@ -130,41 +110,6 @@ def _is_non_paginatable_query(query: str) -> bool:
     stripped = query.strip().lower()
     first_word = stripped.split()[0] if stripped else ""
     return first_word in NON_PAGINATABLE_COMMANDS
-
-
-def _enforce_query_limit(query: str, max_rows: int = MAX_QUERY_ROWS) -> str:
-    """
-    Ensure a SQL query has a LIMIT clause that doesn't exceed max_rows.
-
-    If the query has no LIMIT, adds one. If it has a LIMIT > max_rows,
-    raises an error to inform the user.
-
-    Args:
-        query: SQL query string
-        max_rows: Maximum allowed rows (default: MAX_QUERY_ROWS)
-
-    Returns:
-        Query with enforced LIMIT clause
-
-    Raises:
-        SparkQueryError: If query has LIMIT exceeding max_rows
-    """
-    existing_limit = _extract_limit_from_query(query)
-
-    if existing_limit is not None:
-        if existing_limit > max_rows:
-            raise SparkQueryError(
-                f"Query LIMIT ({existing_limit}) exceeds maximum allowed ({max_rows}). "
-                f"Please reduce your LIMIT or use pagination."
-            )
-        # Query already has acceptable LIMIT
-        return query
-
-    # No LIMIT clause - add one
-    # Strip trailing whitespace and add LIMIT
-    query = query.rstrip()
-    logger.info(f"Adding LIMIT {max_rows} to query without explicit limit")
-    return f"{query} LIMIT {max_rows}"
 
 
 def _check_query_is_valid(query: str) -> bool:
@@ -321,7 +266,7 @@ def count_delta_table(
         # Use timeout wrapper for count operation
         count = run_with_timeout(
             lambda: spark.table(full_table_name).count(),
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name=f"count_{database}.{table}",
         )
         logger.info(f"{full_table_name} has {count} rows.")
@@ -402,7 +347,7 @@ def sample_delta_table(
         # Use timeout wrapper for collect operation
         results = run_with_timeout(
             lambda: [row.asDict() for row in df.collect()],
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name=f"sample_{database}.{table}",
         )
         logger.info(f"Sampled {len(results)} rows.")
@@ -465,7 +410,7 @@ def _execute_non_paginatable_query(
         df = spark.sql(base_query)
         results = run_with_timeout(
             lambda: [row.asDict() for row in df.collect()],
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name="metadata_query",
         )
         logger.info(f"Metadata query returned {len(results)} rows.")
@@ -506,6 +451,7 @@ def query_delta_table(
     offset: int = 0,
     use_cache: bool = True,
     username: str | None = None,
+    max_rows: int = MAX_QUERY_ROWS,
 ) -> TableQueryResponse:
     """
     Executes a SQL query against Delta tables with pagination support.
@@ -545,9 +491,9 @@ def query_delta_table(
         )
 
     # Enforce max limit
-    if limit > MAX_QUERY_ROWS:
+    if limit > max_rows:
         raise SparkQueryError(
-            f"Limit ({limit}) exceeds maximum allowed ({MAX_QUERY_ROWS}). "
+            f"Limit ({limit}) exceeds maximum allowed ({max_rows}). "
             f"Please reduce your limit."
         )
 
@@ -605,7 +551,7 @@ def query_delta_table(
         df = spark.sql(paginated_query)
         results = run_with_timeout(
             lambda: [row.asDict() for row in df.collect()],
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name="query_delta_table",
         )
         logger.info(f"Query returned {len(results)} rows.")
@@ -636,7 +582,7 @@ def query_delta_table(
 
                 count_result = run_with_timeout(
                     lambda: spark.sql(count_query).collect(),
-                    timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+                    timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
                     operation_name="query_count",
                 )
                 total_count = count_result[0]["cnt"]
@@ -1017,7 +963,7 @@ def select_from_delta_table(
         # Use timeout wrapper for count query
         count_result = run_with_timeout(
             lambda: spark.sql(count_query).collect(),
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name=f"count_select_{request.database}.{request.table}",
         )
         total_count = count_result[0]["cnt"]
@@ -1036,7 +982,7 @@ def select_from_delta_table(
         # Use timeout wrapper for data query
         results = run_with_timeout(
             lambda: [row.asDict() for row in df.collect()],
-            timeout_seconds=DEFAULT_SPARK_COLLECT_TIMEOUT,
+            timeout_seconds=SPARK_CONNECT_QUERY_TIMEOUT,
             operation_name=f"select_{request.database}.{request.table}",
         )
         logger.info(f"Select query returned {len(results)} rows.")

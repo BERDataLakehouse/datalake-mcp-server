@@ -11,7 +11,7 @@ Tests cover:
 import logging
 import time
 import concurrent.futures
-from unittest.mock import patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,8 +20,7 @@ from src.service.timeouts import (
     with_timeout,
     run_with_timeout,
     spark_operation_timeout,
-    DEFAULT_SPARK_QUERY_TIMEOUT,
-    DEFAULT_SPARK_COLLECT_TIMEOUT,
+    SPARK_CONNECT_QUERY_TIMEOUT,
     _timeout_executor,
 )
 
@@ -81,13 +80,13 @@ class TestWithTimeoutDecorator:
         assert result == {"key": "value", "count": 42}
 
     def test_decorator_uses_default_timeout_when_none(self):
-        """Test that None timeout uses DEFAULT_SPARK_QUERY_TIMEOUT."""
+        """Test that None timeout uses SPARK_CONNECT_QUERY_TIMEOUT."""
 
         @with_timeout(timeout_seconds=None, operation_name="default_test")
         def quick_function():
             return True
 
-        # This should work because default is 300 seconds
+        # This should work because default is 600 seconds
         result = quick_function()
         assert result is True
 
@@ -374,29 +373,12 @@ class TestConcurrentTimeoutOperations:
 class TestDefaultValues:
     """Tests for default timeout values."""
 
-    def test_default_query_timeout_from_env(self):
-        """Test DEFAULT_SPARK_QUERY_TIMEOUT reads from environment."""
-        # The default is 300 if not set
-        assert DEFAULT_SPARK_QUERY_TIMEOUT == 300 or isinstance(
-            DEFAULT_SPARK_QUERY_TIMEOUT, int
+    def test_spark_connect_query_timeout_from_env(self):
+        """Test SPARK_CONNECT_QUERY_TIMEOUT reads from environment."""
+        # The default is 600 if not set
+        assert SPARK_CONNECT_QUERY_TIMEOUT == 600 or isinstance(
+            SPARK_CONNECT_QUERY_TIMEOUT, int
         )
-
-    def test_default_collect_timeout_from_env(self):
-        """Test DEFAULT_SPARK_COLLECT_TIMEOUT reads from environment."""
-        # The default is 120 if not set
-        assert DEFAULT_SPARK_COLLECT_TIMEOUT == 120 or isinstance(
-            DEFAULT_SPARK_COLLECT_TIMEOUT, int
-        )
-
-    def test_custom_env_timeout_values(self):
-        """Test that environment variables can override defaults."""
-        # This is a design verification - the module reads from os.getenv
-        with patch.dict(
-            "os.environ", {"SPARK_QUERY_TIMEOUT": "600", "SPARK_COLLECT_TIMEOUT": "180"}
-        ):
-            # Re-import to get new values (note: this won't work because values
-            # are set at module load time, but we're verifying the mechanism)
-            pass
 
 
 # =============================================================================
@@ -525,3 +507,66 @@ class TestEdgeCases:
 
         result = returns_large_list()
         assert len(result) == 100000
+
+    def test_negative_timeout_in_decorator(self):
+        """Negative timeout in @with_timeout raises ValueError at decoration time (line 70)."""
+        with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+
+            @with_timeout(timeout_seconds=-5, operation_name="bad_decorator")
+            def never_defined():
+                pass
+
+    def test_zero_timeout_in_decorator(self):
+        """Zero timeout in @with_timeout raises ValueError at decoration time (line 70)."""
+        with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+
+            @with_timeout(timeout_seconds=0, operation_name="zero_decorator")
+            def never_defined():
+                pass
+
+
+# =============================================================================
+# Test run_with_timeout — spark_session stop on timeout (lines 154-160)
+# =============================================================================
+
+
+class TestRunWithTimeoutSparkSessionStop:
+    """Cover the spark_session.stop() branch on timeout."""
+
+    def test_spark_session_stopped_on_timeout(self):
+        """When spark_session is provided and query times out, stop() is called (line 154-158)."""
+        mock_spark = MagicMock()
+
+        with pytest.raises(SparkTimeoutError):
+            run_with_timeout(
+                lambda: time.sleep(10),
+                timeout_seconds=0.05,
+                operation_name="spark_stop_test",
+                spark_session=mock_spark,
+            )
+
+        mock_spark.stop.assert_called_once()
+
+    def test_spark_session_stop_error_swallowed(self):
+        """Exceptions from spark_session.stop() are logged, not raised (line 159-160)."""
+        mock_spark = MagicMock()
+        mock_spark.stop.side_effect = RuntimeError("JVM shutdown error")
+
+        with pytest.raises(SparkTimeoutError):
+            run_with_timeout(
+                lambda: time.sleep(10),
+                timeout_seconds=0.05,
+                operation_name="stop_error_test",
+                spark_session=mock_spark,
+            )
+
+        mock_spark.stop.assert_called_once()
+
+    def test_spark_session_none_not_stopped(self):
+        """When spark_session is None (default), stop() is not called."""
+        with pytest.raises(SparkTimeoutError):
+            run_with_timeout(
+                lambda: time.sleep(10),
+                timeout_seconds=0.05,
+                operation_name="no_session_test",
+            )

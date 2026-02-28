@@ -9,6 +9,7 @@ Provides reusable mocks for external dependencies:
 """
 
 import asyncio
+import atexit
 import concurrent.futures
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,11 +19,39 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import AnyHttpUrl, AnyUrl
 
+from src.main import create_application
 from src.service.app_state import RequestState
 from src.service.dependencies import auth, get_spark_session
 from src.service.exceptions import InvalidTokenError
 from src.service.kb_auth import AdminPermission, KBaseUser
+from src.service.spark_session_pool import _shutdown_pool
+from src.service.timeouts import _shutdown_timeout_executor
 from src.settings import BERDLSettings
+
+
+# =============================================================================
+# Global Cleanup Fixture
+# =============================================================================
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_executors():
+    """
+    Ensure executors are shut down before the test session ends.
+
+    This prevents 'ValueError: I/O operation on closed file' errors that occur
+    when atexit handlers try to log after pytest has closed stdout/stderr.
+    """
+    yield
+
+    # Explicitly shut down executors while logging is still active
+    _shutdown_pool()
+    _shutdown_timeout_executor()
+
+    # Unregister atexit handlers so they don't run again during interpreter shutdown
+    atexit.unregister(_shutdown_pool)
+    atexit.unregister(_shutdown_timeout_executor)
+
 
 # =============================================================================
 # Settings Fixtures
@@ -456,8 +485,6 @@ def mock_app_dependencies(mock_spark_session, mock_kbase_user, mock_settings):
 
     This fixture patches both auth and spark session dependencies.
     """
-    from src.main import create_application
-
     app = create_application()
 
     # Create mock spark session
@@ -502,8 +529,6 @@ def client():
     Note: This requires actual services to be available.
     Use test_client fixture for unit tests with mocks.
     """
-    from src.main import create_application
-
     app = create_application()
     return TestClient(app)
 

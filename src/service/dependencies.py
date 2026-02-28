@@ -46,7 +46,7 @@ class SparkContext:
     For Spark Connect mode:
         - spark is set to the active SparkSession
         - is_standalone_subprocess is False
-        - settings_dict is None
+        - settings_dict contains picklable settings (for async query subprocess reuse)
 
     For Standalone mode:
         - spark is None (session created in subprocess)
@@ -511,10 +511,18 @@ def get_spark_context(
         # Yield phase - OUTSIDE the try/except so route execution errors propagate
         # correctly instead of triggering a fallback (which would yield twice)
         if spark is not None and not spark_connect_failed:
+            # Populate settings_dict even in Connect mode so async query
+            # endpoints can reuse get_spark_context and still have the
+            # picklable settings needed for subprocess execution.
+            connect_settings_dict = base_user_settings_dict.copy()
+            if not connect_settings_dict.get("BERDL_POD_IP"):
+                connect_settings_dict["BERDL_POD_IP"] = "0.0.0.0"
+            connect_settings_dict["SPARK_CONNECT_URL"] = spark_connect_url
+
             ctx = SparkContext(
                 spark=spark,
                 is_standalone_subprocess=False,
-                settings_dict={},  # Not needed for Connect mode
+                settings_dict=connect_settings_dict,
                 app_name=app_name,
                 username=username,
                 auth_token=auth_token,
@@ -522,7 +530,14 @@ def get_spark_context(
             try:
                 yield ctx
             finally:
-                # No cleanup: Connect sessions belong to user's notebook pod
+                # IMPORTANT: Do NOT call spark.stop() here.
+                # The yielded SparkContext may outlive this request when used
+                # by async query background tasks (AsyncQueryExecutor). The
+                # background task holds a reference to ctx after the HTTP 202
+                # response is sent and this cleanup runs. Stopping the session
+                # here would break in-flight background queries.
+                # Connect sessions belong to the user's notebook pod and are
+                # cleaned up when the pod terminates.
                 logger.debug(
                     "Skipping spark.stop() for Spark Connect (cluster owned by user's notebook)"
                 )

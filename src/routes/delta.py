@@ -9,10 +9,11 @@ Routes support full concurrency:
 import logging
 from typing import Annotated, Any, Dict, List, Optional, cast
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from src.delta_lake import data_store, delta_service
 from src.service.dependencies import SparkContext, auth, get_spark_context
+from src.service.query_executor import execute_query
 from src.service.spark_session_pool import run_in_spark_process
 from src.service.standalone_operations import (
     count_table_subprocess,
@@ -20,7 +21,6 @@ from src.service.standalone_operations import (
     get_table_schema_subprocess,
     list_databases_subprocess,
     list_tables_subprocess,
-    query_table_subprocess,
     sample_table_subprocess,
     select_table_subprocess,
 )
@@ -30,6 +30,7 @@ from src.service.models import (
     DatabaseListResponse,
     DatabaseStructureRequest,
     DatabaseStructureResponse,
+    PaginationInfo,
     TableCountRequest,
     TableCountResponse,
     TableListRequest,
@@ -324,7 +325,7 @@ def sample_table(
     "/tables/query",
     response_model=TableQueryResponse,
     status_code=status.HTTP_200_OK,
-    summary="Query Delta tables with pagination",
+    summary="[DEPRECATED] Query Delta tables with pagination",
     description=(
         "Executes a SQL query against Delta tables with pagination support. "
         "Returns query results along with pagination metadata including total count. "
@@ -332,48 +333,30 @@ def sample_table(
         "IMPORTANT: Include an ORDER BY clause in your query for deterministic "
         "pagination results. Without ORDER BY, rows may appear in different order "
         "across pages, causing duplicates or missing records."
+        "\n\nDEPRECATED: This endpoint is deprecated. Use endpoint /delta/tables/query/async/submit for asynchronous query execution."
     ),
     operation_id="query_delta_table",
 )
 def query_table(
     request: TableQueryRequest,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
+    response: Response,
     auth=Depends(auth),
 ) -> TableQueryResponse:
     """
     Endpoint to execute a query against Delta tables with pagination support.
+
+    DEPRECATED: Use async endpoint /delta/tables/query/async/submit instead.
     """
+    # Set deprecation warning header
+    response.headers["Warning"] = (
+        '299 - "Deprecated API: Use endpoint /delta/tables/query/async/submit for asynchronous query execution"'
+    )
+
     # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
 
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
-        result = run_in_spark_process(
-            query_table_subprocess,
-            ctx.settings_dict,
-            query=request.query,
-            limit=request.limit,
-            offset=request.offset,
-            username=username,
-            app_name=ctx.app_name,
-            operation_name="query_table",
-        )
-        # Result is a dict, need to convert back to response model
-        from src.service.models import PaginationInfo
-
-        return TableQueryResponse(
-            result=result["result"],
-            pagination=PaginationInfo(**result["pagination"]),
-        )
-    else:
-        # Use Spark Connect session directly
-        return delta_service.query_delta_table(
-            spark=ctx.spark,
-            query=request.query,
-            limit=request.limit,
-            offset=request.offset,
-            username=username,
-        )
+    return execute_query(ctx, request.query, request.limit, request.offset, username)
 
 
 @router.post(
@@ -417,8 +400,6 @@ def select_table(
             operation_name="select_table",
         )
         # Result is a dict, need to convert back to response model
-        from src.service.models import PaginationInfo
-
         return TableSelectResponse(
             data=result["data"],
             pagination=PaginationInfo(**result["pagination"]),
