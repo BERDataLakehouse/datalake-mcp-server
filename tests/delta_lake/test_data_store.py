@@ -780,3 +780,144 @@ class TestGetTablesViaSpark:
                 use_hms=False,
                 settings=mock_settings,
             )
+
+
+# =============================================================================
+# Coverage: settings=None fallback paths
+# =============================================================================
+
+
+class TestSettingsNoneFallback:
+    """Cover the `if settings is None: settings = get_settings()` branches."""
+
+    def test_get_databases_settings_none(self, mock_settings):
+        """get_databases loads settings from get_settings() when None (line 295)."""
+        with patch(
+            "src.delta_lake.data_store.get_settings", return_value=mock_settings
+        ):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_databases",
+                return_value=["db1"],
+            ):
+                result = data_store.get_databases(
+                    use_hms=True, return_json=False, settings=None
+                )
+
+        assert result == ["db1"]
+
+    def test_get_tables_settings_none(self, mock_settings):
+        """get_tables loads settings from get_settings() when None (line 368)."""
+        with patch(
+            "src.delta_lake.data_store.get_settings", return_value=mock_settings
+        ):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_tables",
+                return_value=["t1"],
+            ):
+                result = data_store.get_tables(
+                    database="db1", use_hms=True, return_json=False, settings=None
+                )
+
+        assert result == ["t1"]
+
+    def test_get_db_structure_settings_none(self, mock_settings):
+        """get_db_structure loads settings from get_settings() when None (line 420)."""
+        with patch(
+            "src.delta_lake.data_store.get_settings", return_value=mock_settings
+        ):
+            with patch(
+                "src.delta_lake.data_store.hive_metastore.get_databases",
+                return_value=["db1"],
+            ):
+                with patch(
+                    "src.delta_lake.data_store.hive_metastore.get_tables",
+                    return_value=["t1"],
+                ):
+                    result = data_store.get_db_structure(
+                        use_hms=True, return_json=False, settings=None
+                    )
+
+        assert result == {"db1": ["t1"]}
+
+    def test_database_exists_settings_none(self, mock_settings):
+        """database_exists loads settings from get_settings() when None (line 452)."""
+        with patch(
+            "src.delta_lake.data_store.get_settings", return_value=mock_settings
+        ):
+            with patch(
+                "src.delta_lake.data_store.get_databases", return_value=["testdb"]
+            ):
+                result = data_store.database_exists("testdb", settings=None)
+
+        assert result is True
+
+    def test_table_exists_settings_none(self, mock_settings):
+        """table_exists loads settings from get_settings() when None (line 469)."""
+        with patch(
+            "src.delta_lake.data_store.get_settings", return_value=mock_settings
+        ):
+            with patch(
+                "src.delta_lake.data_store.get_tables", return_value=["users"]
+            ):
+                result = data_store.table_exists("db", "users", settings=None)
+
+        assert result is True
+
+
+# =============================================================================
+# Coverage: _get_tables_with_schemas + get_db_structure via Spark with schema
+# =============================================================================
+
+
+class TestGetTablesWithSchemas:
+    """Cover _get_tables_with_schemas dict comprehension body (line 246)."""
+
+    def test_returns_schemas_for_tables(self):
+        """_get_tables_with_schemas calls get_table_schema for each table."""
+        mock_spark = MagicMock()
+
+        with patch(
+            "src.delta_lake.data_store.get_table_schema",
+            side_effect=lambda database, table, spark, return_json: [
+                {"name": "id", "type": "int"}
+            ],
+        ):
+            result = data_store._get_tables_with_schemas(
+                "mydb", ["t1", "t2"], mock_spark
+            )
+
+        assert "t1" in result
+        assert "t2" in result
+        assert result["t1"] == [{"name": "id", "type": "int"}]
+
+
+class TestGetDbStructureViaSparkWithSchema:
+    """Cover line 412: get_db_structure via Spark (not HMS) with with_schema=True."""
+
+    def test_via_spark_with_schema(self, mock_spark_session, mock_settings):
+        """get_db_structure via Spark with schema calls _get_tables_with_schemas."""
+        spark = mock_spark_session(
+            databases=["db1"], tables={"db1": ["t1"]}
+        )
+
+        with patch(
+            "src.delta_lake.data_store.get_databases",
+            return_value=["db1"],
+        ):
+            with patch(
+                "src.delta_lake.data_store.get_tables",
+                return_value=["t1"],
+            ):
+                with patch(
+                    "src.delta_lake.data_store._get_tables_with_schemas",
+                    return_value={"t1": [{"name": "col", "type": "string"}]},
+                ):
+                    result = data_store.get_db_structure(
+                        spark=spark,
+                        use_hms=False,
+                        with_schema=True,
+                        return_json=False,
+                        settings=mock_settings,
+                    )
+
+        assert result["db1"]["t1"] == [{"name": "col", "type": "string"}]

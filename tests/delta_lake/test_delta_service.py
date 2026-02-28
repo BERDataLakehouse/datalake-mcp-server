@@ -29,6 +29,7 @@ from src.service.models import (
     AggregationSpec,
     ColumnSpec,
     FilterCondition,
+    JoinClause,
     OrderBySpec,
     TableSelectRequest,
     TableSelectResponse,
@@ -541,46 +542,6 @@ class TestBuildSelectQuery:
 # =============================================================================
 # Tests for Limit Enforcement
 # =============================================================================
-
-
-class TestQueryLimitEnforcement:
-    """Tests for query limit enforcement functions."""
-
-    def test_extract_limit_from_query_with_limit(self):
-        """Test extracting LIMIT from query that has one."""
-        query = "SELECT * FROM users LIMIT 50"
-        limit = delta_service._extract_limit_from_query(query)
-        assert limit == 50
-
-    def test_extract_limit_from_query_without_limit(self):
-        """Test extracting LIMIT from query that doesn't have one."""
-        query = "SELECT * FROM users"
-        limit = delta_service._extract_limit_from_query(query)
-        assert limit is None
-
-    def test_extract_limit_case_insensitive(self):
-        """Test that LIMIT extraction is case insensitive."""
-        query = "SELECT * FROM users limit 100"
-        limit = delta_service._extract_limit_from_query(query)
-        assert limit == 100
-
-    def test_enforce_query_limit_adds_limit(self):
-        """Test that _enforce_query_limit adds LIMIT when missing."""
-        query = "SELECT * FROM users"
-        result = delta_service._enforce_query_limit(query, max_rows=1000)
-        assert "LIMIT 1000" in result
-
-    def test_enforce_query_limit_keeps_acceptable_limit(self):
-        """Test that acceptable LIMIT is kept."""
-        query = "SELECT * FROM users LIMIT 500"
-        result = delta_service._enforce_query_limit(query, max_rows=1000)
-        assert result == query
-
-    def test_enforce_query_limit_rejects_excessive_limit(self):
-        """Test that excessive LIMIT raises error."""
-        query = "SELECT * FROM users LIMIT 100000"
-        with pytest.raises(SparkQueryError, match="exceeds maximum"):
-            delta_service._enforce_query_limit(query, max_rows=50000)
 
 
 # =============================================================================
@@ -1267,10 +1228,6 @@ class TestServiceConstants:
         """Test MAX_QUERY_ROWS constant."""
         assert delta_service.MAX_QUERY_ROWS == 1000
 
-    def test_max_select_rows(self):
-        """Test MAX_SELECT_ROWS constant."""
-        assert delta_service.MAX_SELECT_ROWS == 1000
-
     def test_cache_expiry_seconds(self):
         """Test CACHE_EXPIRY_SECONDS constant."""
         assert delta_service.CACHE_EXPIRY_SECONDS == 3600
@@ -1458,7 +1415,6 @@ class TestBuildJoinClause:
 
     def test_inner_join(self):
         """Test building INNER JOIN clause."""
-        from src.service.models import JoinClause
 
         join = JoinClause(
             join_type="INNER",
@@ -1476,7 +1432,6 @@ class TestBuildJoinClause:
 
     def test_left_join(self):
         """Test building LEFT JOIN clause."""
-        from src.service.models import JoinClause
 
         join = JoinClause(
             join_type="LEFT",
@@ -1491,7 +1446,6 @@ class TestBuildJoinClause:
 
     def test_right_join(self):
         """Test building RIGHT JOIN clause."""
-        from src.service.models import JoinClause
 
         join = JoinClause(
             join_type="RIGHT",
@@ -1506,7 +1460,6 @@ class TestBuildJoinClause:
 
     def test_full_join(self):
         """Test building FULL JOIN clause."""
-        from src.service.models import JoinClause
 
         join = JoinClause(
             join_type="FULL",
@@ -1525,7 +1478,6 @@ class TestBuildSelectQueryWithJoins:
 
     def test_select_with_join(self):
         """Test SELECT query with JOIN."""
-        from src.service.models import JoinClause
 
         request = TableSelectRequest(
             database="mydb",

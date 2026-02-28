@@ -543,6 +543,31 @@ class TestQueryTableEndpoint:
         assert data["result"][0]["count"] == 100
         assert data["pagination"]["total_count"] == 1
 
+    def test_query_deprecation_warning(self, delta_client):
+        """Test that the query endpoint returns a deprecation warning header."""
+        client, spark, user = delta_client
+
+        query_response = TableQueryResponse(
+            result=[{"count": 100}],
+            pagination=PaginationInfo(
+                limit=1000, offset=0, total_count=1, has_more=False
+            ),
+        )
+
+        with patch(
+            "src.routes.delta.delta_service.query_delta_table",
+            return_value=query_response,
+        ):
+            response = client.post(
+                "/delta/tables/query",
+                json={"query": "SELECT COUNT(*) as count FROM users"},
+            )
+
+        assert response.status_code == 200
+        assert "Warning" in response.headers
+        assert "299" in response.headers["Warning"]
+        assert "/delta/tables/query/async/submit" in response.headers["Warning"]
+
 
 class TestSelectTableEndpoint:
     """Tests for the /delta/tables/select endpoint."""
@@ -1136,18 +1161,17 @@ class TestStandaloneSubprocessDispatch:
 
         client = TestClient(app)
 
+        mock_response = TableQueryResponse(
+            result=[{"id": 1}],
+            pagination=PaginationInfo(
+                total_count=1, limit=100, offset=0, has_more=False
+            ),
+        )
+
         with patch(
-            "src.routes.delta.run_in_spark_process",
-            return_value={
-                "result": [{"id": 1}],
-                "pagination": {
-                    "total_count": 1,
-                    "limit": 100,
-                    "offset": 0,
-                    "has_more": False,
-                },
-            },
-        ) as mock_run:
+            "src.routes.delta.execute_query",
+            return_value=mock_response,
+        ) as mock_exec:
             response = client.post(
                 "/delta/tables/query",
                 json={"query": "SELECT * FROM test_table"},
@@ -1155,7 +1179,7 @@ class TestStandaloneSubprocessDispatch:
 
         assert response.status_code == 200
         assert response.json()["result"] == [{"id": 1}]
-        mock_run.assert_called_once()
+        mock_exec.assert_called_once()
 
     def test_select_table_standalone_dispatch(self, mock_kbase_user):
         """Test that select_table dispatches to run_in_spark_process in Standalone mode."""

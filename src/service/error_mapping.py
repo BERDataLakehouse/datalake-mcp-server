@@ -10,6 +10,7 @@ from fastapi import status
 
 from src.service.errors import ErrorType
 from src.service.exceptions import (
+    AsyncQueryError,
     AuthenticationError,
     DeltaDatabaseNotFoundError,
     DeltaLakeError,
@@ -19,6 +20,10 @@ from src.service.exceptions import (
     InvalidAuthHeaderError,
     InvalidS3PathError,
     InvalidTokenError,
+    JobAccessDeniedError,
+    JobNotFoundError,
+    JobNotReadyError,
+    TooManyJobsError,
     MCPServerError,
     MissingMFAError,
     MissingRoleError,
@@ -35,6 +40,8 @@ _H401 = status.HTTP_401_UNAUTHORIZED
 _H403 = status.HTTP_403_FORBIDDEN
 _H404 = status.HTTP_404_NOT_FOUND
 _H408 = status.HTTP_408_REQUEST_TIMEOUT
+_H409 = status.HTTP_409_CONFLICT
+_H429 = status.HTTP_429_TOO_MANY_REQUESTS
 _H503 = status.HTTP_503_SERVICE_UNAVAILABLE
 
 
@@ -70,6 +77,12 @@ _ERR_MAP = {
     SparkOperationError: ErrorMapping(ErrorType.SPARK_OPERATION_ERROR, _H503),
     SparkQueryError: ErrorMapping(ErrorType.SPARK_QUERY_ERROR, _H400),
     SparkTimeoutError: ErrorMapping(ErrorType.SPARK_TIMEOUT_ERROR, _H408),
+    # Async query errors
+    JobNotFoundError: ErrorMapping(ErrorType.JOB_NOT_FOUND, _H404),
+    JobNotReadyError: ErrorMapping(ErrorType.JOB_NOT_READY, _H409),
+    JobAccessDeniedError: ErrorMapping(ErrorType.JOB_ACCESS_DENIED, _H403),
+    TooManyJobsError: ErrorMapping(ErrorType.TOO_MANY_JOBS, _H429),
+    AsyncQueryError: ErrorMapping(ErrorType.ASYNC_QUERY_ERROR, _H400),
     # Base error fallback
     MCPServerError: ErrorMapping(None, status.HTTP_500_INTERNAL_SERVER_ERROR),
 }

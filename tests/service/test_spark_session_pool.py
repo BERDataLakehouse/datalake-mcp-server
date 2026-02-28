@@ -23,7 +23,7 @@ import src.service.spark_session_pool as pool_module
 from src.service.exceptions import SparkTimeoutError
 from src.service.spark_session_pool import (
     STANDALONE_POOL_SIZE,
-    STANDALONE_POOL_TIMEOUT,
+    SPARK_STANDALONE_QUERY_TIMEOUT,
     _get_pool,
     _shutdown_pool,
     get_pool_status,
@@ -77,10 +77,10 @@ class TestConstants:
         assert isinstance(STANDALONE_POOL_SIZE, int)
         assert STANDALONE_POOL_SIZE > 0
 
-    def test_standalone_pool_timeout_default(self):
+    def test_standalone_query_timeout_default(self):
         """Test default timeout is 600 seconds (10 minutes)."""
-        assert isinstance(STANDALONE_POOL_TIMEOUT, float)
-        assert STANDALONE_POOL_TIMEOUT > 0
+        assert isinstance(SPARK_STANDALONE_QUERY_TIMEOUT, float)
+        assert SPARK_STANDALONE_QUERY_TIMEOUT > 0
 
     def test_pool_size_from_env(self):
         """Test pool size can be configured via environment variable."""
@@ -92,11 +92,11 @@ class TestConstants:
             # Restore original
             importlib.reload(pool_module)
 
-    def test_pool_timeout_from_env(self):
+    def test_standalone_query_timeout_from_env(self):
         """Test timeout can be configured via environment variable."""
-        with patch.dict("os.environ", {"STANDALONE_POOL_TIMEOUT": "120.5"}):
+        with patch.dict("os.environ", {"SPARK_STANDALONE_QUERY_TIMEOUT": "120.5"}):
             importlib.reload(pool_module)
-            assert pool_module.STANDALONE_POOL_TIMEOUT == 120.5
+            assert pool_module.SPARK_STANDALONE_QUERY_TIMEOUT == 120.5
 
             # Restore original
             importlib.reload(pool_module)

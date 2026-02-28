@@ -12,6 +12,7 @@ Tests cover:
 """
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -150,9 +151,11 @@ class TestEnsureSessionManagerStarted:
     """Tests for _ensure_session_manager_started method."""
 
     @pytest.mark.asyncio
-    async def test_starts_session_manager_on_first_call(self, mock_mcp_server):
+    async def test_starts_session_manager_on_first_call(
+        self, mock_mcp_server, transport_with_cleanup
+    ):
         """Test that session manager is started on first call."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -178,9 +181,11 @@ class TestEnsureSessionManagerStarted:
             assert transport._session_manager is mock_manager
 
     @pytest.mark.asyncio
-    async def test_idempotent_when_already_started(self, mock_mcp_server):
+    async def test_idempotent_when_already_started(
+        self, mock_mcp_server, transport_with_cleanup
+    ):
         """Test that repeated calls don't restart the manager."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -202,13 +207,10 @@ class TestEnsureSessionManagerStarted:
 
     @pytest.mark.asyncio
     async def test_passes_event_store_to_manager(
-        self, mock_mcp_server, mock_event_store
+        self, mock_mcp_server, mock_event_store, transport_with_cleanup
     ):
         """Test that event store is passed to session manager."""
-        transport = StatelessHttpTransport(
-            mcp_server=mock_mcp_server,
-            event_store=mock_event_store,
-        )
+        transport = transport_with_cleanup(event_store=mock_event_store)
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -230,12 +232,11 @@ class TestEnsureSessionManagerStarted:
             )
 
     @pytest.mark.asyncio
-    async def test_passes_json_response_false_to_manager(self, mock_mcp_server):
+    async def test_passes_json_response_false_to_manager(
+        self, mock_mcp_server, transport_with_cleanup
+    ):
         """Test that json_response=False is passed to session manager."""
-        transport = StatelessHttpTransport(
-            mcp_server=mock_mcp_server,
-            json_response=False,
-        )
+        transport = transport_with_cleanup(json_response=False)
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -266,9 +267,11 @@ class TestHandleRequest:
     """Tests for handle_request method."""
 
     @pytest.mark.asyncio
-    async def test_handle_request_success(self, mock_mcp_server, mock_request):
+    async def test_handle_request_success(
+        self, mock_mcp_server, mock_request, transport_with_cleanup
+    ):
         """Test successful request handling."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -305,9 +308,11 @@ class TestHandleRequest:
             assert response.headers["content-type"] == "application/json"
 
     @pytest.mark.asyncio
-    async def test_handle_request_with_404_status(self, mock_mcp_server, mock_request):
+    async def test_handle_request_with_404_status(
+        self, mock_mcp_server, mock_request, transport_with_cleanup
+    ):
         """Test request handling with non-200 status code."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -343,10 +348,10 @@ class TestHandleRequest:
 
     @pytest.mark.asyncio
     async def test_handle_request_multiple_body_chunks(
-        self, mock_mcp_server, mock_request
+        self, mock_mcp_server, mock_request, transport_with_cleanup
     ):
         """Test request handling with multiple body chunks."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -379,10 +384,10 @@ class TestHandleRequest:
 
     @pytest.mark.asyncio
     async def test_handle_request_session_manager_not_initialized(
-        self, mock_mcp_server, mock_request
+        self, mock_mcp_server, mock_request, transport_with_cleanup
     ):
         """Test that HTTPException is raised if session manager not initialized."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
         transport._manager_started = True  # Pretend started but no manager
         transport._session_manager = None
 
@@ -394,10 +399,10 @@ class TestHandleRequest:
 
     @pytest.mark.asyncio
     async def test_handle_request_exception_raises_http_exception(
-        self, mock_mcp_server, mock_request
+        self, mock_mcp_server, mock_request, transport_with_cleanup
     ):
         """Test that exceptions in session manager raise HTTPException."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -421,9 +426,11 @@ class TestHandleRequest:
             assert exc_info.value.detail == "Internal server error"
 
     @pytest.mark.asyncio
-    async def test_handle_request_empty_headers(self, mock_mcp_server, mock_request):
+    async def test_handle_request_empty_headers(
+        self, mock_mcp_server, mock_request, transport_with_cleanup
+    ):
         """Test handling response with no headers."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -615,9 +622,11 @@ class TestConcurrency:
     """Tests for concurrent request handling."""
 
     @pytest.mark.asyncio
-    async def test_concurrent_startup_only_creates_one_manager(self, mock_mcp_server):
+    async def test_concurrent_startup_only_creates_one_manager(
+        self, mock_mcp_server, transport_with_cleanup
+    ):
         """Test that concurrent startups only create one session manager."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
         call_count = 0
 
         with patch(
@@ -650,10 +659,10 @@ class TestConcurrency:
 
     @pytest.mark.asyncio
     async def test_concurrent_requests_after_startup(
-        self, mock_mcp_server, mock_request
+        self, mock_mcp_server, mock_request, transport_with_cleanup
     ):
         """Test handling multiple concurrent requests."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
         request_count = 0
 
         with patch(
@@ -702,9 +711,11 @@ class TestStatelessModeVerification:
     """Tests to verify stateless mode is correctly enabled."""
 
     @pytest.mark.asyncio
-    async def test_stateless_true_is_passed_to_manager(self, mock_mcp_server):
+    async def test_stateless_true_is_passed_to_manager(
+        self, mock_mcp_server, transport_with_cleanup
+    ):
         """Verify that stateless=True is always passed to StreamableHTTPSessionManager."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -732,11 +743,12 @@ class TestLogging:
     """Tests for logging behavior."""
 
     @pytest.mark.asyncio
-    async def test_logs_debug_message_on_startup(self, mock_mcp_server, caplog):
+    async def test_logs_debug_message_on_startup(
+        self, mock_mcp_server, caplog, transport_with_cleanup
+    ):
         """Test that startup logs debug message."""
-        import logging
 
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with caplog.at_level(logging.DEBUG):
             with patch(
@@ -758,12 +770,8 @@ class TestLogging:
                     for msg in log_messages
                 )
 
-                # Cleanup
-                await transport.shutdown()
-
     def test_mount_logs_message(self, mock_fastapi_mcp, caplog):
         """Test that mount logs appropriate message."""
-        import logging
 
         with caplog.at_level(logging.INFO):
             mount_stateless_mcp(mock_fastapi_mcp)
@@ -781,9 +789,11 @@ class TestEdgeCases:
     """Tests for edge cases and boundary conditions."""
 
     @pytest.mark.asyncio
-    async def test_handle_request_with_empty_body(self, mock_mcp_server, mock_request):
+    async def test_handle_request_with_empty_body(
+        self, mock_mcp_server, mock_request, transport_with_cleanup
+    ):
         """Test handling response with empty body."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -808,12 +818,20 @@ class TestEdgeCases:
             assert response.status_code == 204
             assert response.body == b""
 
+            mock_manager.handle_request = mock_handle_request
+            MockManager.return_value = mock_manager
+
+            response = await transport.handle_request(mock_request)
+
+            assert response.status_code == 204
+            assert response.body == b""
+
     @pytest.mark.asyncio
     async def test_handle_request_preserves_multiple_headers(
-        self, mock_mcp_server, mock_request
+        self, mock_mcp_server, mock_request, transport_with_cleanup
     ):
         """Test that multiple headers are preserved in response."""
-        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+        transport = transport_with_cleanup()
 
         with patch(
             "src.service.stateless_http_transport.StreamableHTTPSessionManager"
@@ -855,3 +873,180 @@ class TestEdgeCases:
         routes = [route.path for route in mock_fastapi_mcp.fastapi.routes]
         # Empty becomes "/" after normalization
         assert "/" in routes or "" in routes
+
+
+# =============================================================================
+# Coverage: uncovered error branches and race conditions
+# =============================================================================
+
+
+class TestSessionManagerErrorBranches:
+    """Cover exception handling inside the session manager background task."""
+
+    @pytest.mark.asyncio
+    async def test_run_session_manager_generic_exception(self, mock_mcp_server):
+        """Cover lines 109-113: non-CancelledError exception in run_session_manager."""
+        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+
+        with patch(
+            "src.service.stateless_http_transport.StreamableHTTPSessionManager"
+        ) as MockManager:
+            mock_manager = MagicMock()
+
+            # Make run() context manager's __aenter__ raise a generic exception
+            async_cm = MagicMock()
+            async_cm.__aenter__ = AsyncMock(
+                side_effect=RuntimeError("manager startup failed")
+            )
+            async_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_manager.run.return_value = async_cm
+            MockManager.return_value = mock_manager
+
+            await transport._ensure_session_manager_started()
+
+            # Wait a moment for the background task to propagate the exception
+            await asyncio.sleep(0.2)
+
+            # The task should have failed
+            assert transport._manager_task is not None
+            assert transport._manager_task.done()
+
+            # Retrieve the exception so asyncio doesn't log
+            # "Task exception was never retrieved" at teardown
+            with pytest.raises(RuntimeError, match="manager startup failed"):
+                transport._manager_task.result()
+
+        await transport.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_handle_request_reraises_http_exception(
+        self, mock_mcp_server, mock_request
+    ):
+        """Cover lines 174-179: HTTPException from session manager is re-raised."""
+        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+
+        with patch(
+            "src.service.stateless_http_transport.StreamableHTTPSessionManager"
+        ) as MockManager:
+            mock_manager = MagicMock()
+            async_cm = MagicMock()
+            async_cm.__aenter__ = AsyncMock(return_value=None)
+            async_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_manager.run.return_value = async_cm
+
+            async def raise_http_exc(scope, receive, send):
+                raise HTTPException(status_code=405, detail="Method Not Allowed")
+
+            mock_manager.handle_request = raise_http_exc
+            MockManager.return_value = mock_manager
+
+            with pytest.raises(HTTPException) as exc_info:
+                await transport.handle_request(mock_request)
+
+            assert exc_info.value.status_code == 405
+            assert exc_info.value.detail == "Method Not Allowed"
+
+        await transport.shutdown()
+
+
+class TestDoubleCheckedLocking:
+    """Cover line 81: the inner _manager_started check inside the lock."""
+
+    @pytest.mark.asyncio
+    async def test_second_caller_hits_inner_check(self, mock_mcp_server):
+        """Two coroutines race for the lock; the loser hits line 80-81."""
+        transport = StatelessHttpTransport(mcp_server=mock_mcp_server)
+
+        first_acquired_lock = asyncio.Event()
+        can_release_lock = asyncio.Event()
+
+        with patch(
+            "src.service.stateless_http_transport.StreamableHTTPSessionManager"
+        ) as MockManager:
+            mock_manager = MagicMock()
+            async_cm = MagicMock()
+            async_cm.__aenter__ = AsyncMock(return_value=None)
+            async_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_manager.run.return_value = async_cm
+            MockManager.return_value = mock_manager
+
+            original_lock = transport._startup_lock
+
+            # Wrap the lock so the first acquirer pauses inside
+            class InstrumentedLock:
+                def __init__(self, real_lock):
+                    self._real_lock = real_lock
+                    self._first_enter = True
+
+                async def __aenter__(self):
+                    await self._real_lock.__aenter__()
+                    if self._first_enter:
+                        self._first_enter = False
+                        first_acquired_lock.set()
+                        await can_release_lock.wait()
+                    return self
+
+                async def __aexit__(self, *args):
+                    return await self._real_lock.__aexit__(*args)
+
+            transport._startup_lock = InstrumentedLock(original_lock)
+
+            async def first_call():
+                await transport._ensure_session_manager_started()
+
+            async def second_call():
+                # Wait for first to hold the lock
+                await first_acquired_lock.wait()
+                # Now _manager_started is False, so line 76 passes.
+                # But first call will finish and set _manager_started = True
+                # before we acquire the lock.
+                # Release the first caller so it finishes.
+                can_release_lock.set()
+                # By the time we enter the lock, _manager_started is True → line 81
+                await transport._ensure_session_manager_started()
+
+            await asyncio.gather(first_call(), second_call())
+
+            # Only one manager created despite two callers
+            MockManager.assert_called_once()
+
+        await transport.shutdown()
+
+
+class TestMountedRouteHandler:
+    """Cover line 255: the registered route handler body."""
+
+    @pytest.mark.asyncio
+    async def test_mounted_route_delegates_to_transport(self, mock_fastapi_mcp):
+        """The mounted route handler calls transport.handle_request (line 255)."""
+        from fastapi.testclient import TestClient
+
+        transport = mount_stateless_mcp(mock_fastapi_mcp, mount_path="/mcp")
+
+        with patch.object(
+            transport,
+            "handle_request",
+            new_callable=AsyncMock,
+            return_value=MagicMock(
+                status_code=200,
+                body=b'{"ok":true}',
+                headers={},
+                media_type=None,
+                background=None,
+            ),
+        ) as mock_handle:
+            # Use the actual FastAPI TestClient to invoke the registered route
+            from starlette.responses import Response as StarletteResponse
+
+            mock_resp = StarletteResponse(
+                content=b'{"ok":true}',
+                status_code=200,
+                media_type="application/json",
+            )
+            mock_handle.return_value = mock_resp
+
+            client = TestClient(mock_fastapi_mcp.fastapi)
+            response = client.post("/mcp", content=b'{}')
+
+            mock_handle.assert_called_once()
+            assert response.status_code == 200

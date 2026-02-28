@@ -3,6 +3,7 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import psycopg
 import pytest
 
 from src.postgres.connection import _validate_not_empty, get_postgres_connection
@@ -184,8 +185,6 @@ class TestGetPostgresConnection:
 
     def test_psycopg_error_wrapped_in_connection_error(self):
         """Test that psycopg errors are wrapped in ConnectionError."""
-        import psycopg
-
         env_vars = {
             "POSTGRES_URL": "localhost:5432",
             "POSTGRES_DB": "testdb",
