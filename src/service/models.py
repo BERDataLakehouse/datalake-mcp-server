@@ -407,7 +407,7 @@ class JobStatus(str, Enum):
 
 
 class JobRecord(BaseModel):
-    """Internal model for tracking async query job state in Redis."""
+    """Internal model for tracking async query job state in the S3/MinIO-backed job store."""
 
     job_id: Annotated[str, Field(description="Unique job identifier (UUID4)")]
     user: Annotated[str, Field(description="KBase username who submitted the job")]
