@@ -6,7 +6,6 @@ Tests cover:
 - Result path building
 - Result upload and download
 - Result prefix deletion
-- Presigned URL generation (with file exclusion)
 - .s3keep creation
 """
 
@@ -22,7 +21,6 @@ from src.async_query.s3_client import (
     create_s3keep,
     delete_result_prefix,
     download_result,
-    generate_presigned_urls,
     upload_result,
 )
 
@@ -124,128 +122,6 @@ class TestCreateS3Client:
 # =============================================================================
 
 
-class TestGeneratePresignedUrls:
-    """Tests for presigned URL generation."""
-
-    def test_generates_urls_for_data_files(self):
-        """Generates presigned URLs for actual data files."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/part-00000.json", "Size": 1024},
-            ]
-        }
-        mock_client.generate_presigned_url.return_value = (
-            "https://minio/presigned/part-00000.json"
-        )
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/", expires_in=600)
-
-        assert len(urls) == 1
-        assert urls[0] == "https://minio/presigned/part-00000.json"
-        mock_client.generate_presigned_url.assert_called_once_with(
-            "get_object",
-            Params={"Bucket": "bucket", "Key": "prefix/part-00000.json"},
-            ExpiresIn=600,
-        )
-
-    def test_excludes_spark_internal_files(self):
-        """Excludes _SUCCESS, _metadata.json, _committed_, _started_ files."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/_SUCCESS", "Size": 0},
-                {"Key": "prefix/_metadata.json", "Size": 512},
-                {"Key": "prefix/_committed_123", "Size": 256},
-                {"Key": "prefix/_started_123", "Size": 128},
-                {"Key": "prefix/part-00000.json", "Size": 2048},
-            ]
-        }
-        mock_client.generate_presigned_url.return_value = "https://url"
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/")
-
-        # Only the data file should get a URL
-        assert len(urls) == 1
-
-    def test_excludes_empty_files(self):
-        """Excludes zero-byte directory markers."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/", "Size": 0},
-                {"Key": "prefix/part-00000.json", "Size": 1024},
-            ]
-        }
-        mock_client.generate_presigned_url.return_value = "https://url"
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/")
-        assert len(urls) == 1
-
-    def test_empty_listing(self):
-        """Returns empty list when no objects found."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {}
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/")
-        assert urls == []
-
-    def test_multiple_data_files(self):
-        """Generates URLs for multiple data files."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/part-00000.json", "Size": 1024},
-                {"Key": "prefix/part-00001.json", "Size": 2048},
-                {"Key": "prefix/_SUCCESS", "Size": 0},
-            ]
-        }
-        mock_client.generate_presigned_url.side_effect = [
-            "https://url1",
-            "https://url2",
-        ]
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/")
-        assert len(urls) == 2
-
-    def test_raises_on_s3_error(self):
-        """Propagates S3 exceptions."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.side_effect = Exception("S3 error")
-
-        with pytest.raises(Exception, match="S3 error"):
-            generate_presigned_urls(mock_client, "bucket", "prefix/")
-
-    def test_uses_default_expiry(self):
-        """Uses ASYNC_QUERY_PRESIGNED_URL_EXPIRY when expires_in is None."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/part-00000.json", "Size": 1024},
-            ]
-        }
-        mock_client.generate_presigned_url.return_value = "https://url"
-
-        generate_presigned_urls(mock_client, "bucket", "prefix/")
-
-        call_kwargs = mock_client.generate_presigned_url.call_args
-        assert call_kwargs.kwargs["ExpiresIn"] == 3600  # default
-
-    def test_excludes_s3keep_files(self):
-        """Excludes .s3keep directory markers (zero-byte)."""
-        mock_client = MagicMock()
-        mock_client.list_objects_v2.return_value = {
-            "Contents": [
-                {"Key": "prefix/.s3keep", "Size": 0},
-                {"Key": "prefix/part-00000.json", "Size": 1024},
-            ]
-        }
-        mock_client.generate_presigned_url.return_value = "https://url"
-
-        urls = generate_presigned_urls(mock_client, "bucket", "prefix/")
-        assert len(urls) == 1
-
-
 # =============================================================================
 # upload_result Tests
 # =============================================================================
@@ -259,7 +135,7 @@ class TestUploadResult:
         mock_client = MagicMock()
         data = json.dumps([{"id": 1}, {"id": 2}])
 
-        upload_result(mock_client, "cdm-lake", "prefix/", data, result_format="json")
+        upload_result(mock_client, "cdm-lake", "prefix/", data)
 
         mock_client.put_object.assert_called_once()
         call_kwargs = mock_client.put_object.call_args.kwargs
@@ -267,27 +143,6 @@ class TestUploadResult:
         assert call_kwargs["Key"] == "prefix/result.json"
         assert call_kwargs["Body"] == data.encode("utf-8")
         assert call_kwargs["ContentType"] == "application/json"
-
-    def test_upload_parquet_result(self):
-        """Uploads parquet result with octet-stream content type."""
-        mock_client = MagicMock()
-
-        upload_result(
-            mock_client, "cdm-lake", "prefix/", "data", result_format="parquet"
-        )
-
-        call_kwargs = mock_client.put_object.call_args.kwargs
-        assert call_kwargs["Key"] == "prefix/result.parquet"
-        assert call_kwargs["ContentType"] == "application/octet-stream"
-
-    def test_upload_default_format_is_json(self):
-        """Default result_format is json."""
-        mock_client = MagicMock()
-
-        upload_result(mock_client, "cdm-lake", "prefix/", "[]")
-
-        call_kwargs = mock_client.put_object.call_args.kwargs
-        assert call_kwargs["Key"] == "prefix/result.json"
 
     def test_upload_propagates_s3_error(self):
         """Propagates S3 exceptions on upload failure."""
@@ -314,39 +169,11 @@ class TestDownloadResult:
         body_stream.read.return_value = json.dumps(result_data).encode("utf-8")
         mock_client.get_object.return_value = {"Body": body_stream}
 
-        result = download_result(
-            mock_client, "cdm-lake", "prefix/", result_format="json"
-        )
+        result = download_result(mock_client, "cdm-lake", "prefix/")
 
         assert result == result_data
         mock_client.get_object.assert_called_once_with(
             Bucket="cdm-lake", Key="prefix/result.json"
-        )
-
-    def test_download_default_format_is_json(self):
-        """Default result_format is json."""
-        mock_client = MagicMock()
-        body_stream = MagicMock()
-        body_stream.read.return_value = b"[]"
-        mock_client.get_object.return_value = {"Body": body_stream}
-
-        download_result(mock_client, "cdm-lake", "prefix/")
-
-        mock_client.get_object.assert_called_once_with(
-            Bucket="cdm-lake", Key="prefix/result.json"
-        )
-
-    def test_download_parquet_key(self):
-        """Uses .parquet extension for parquet format."""
-        mock_client = MagicMock()
-        body_stream = MagicMock()
-        body_stream.read.return_value = b"[]"
-        mock_client.get_object.return_value = {"Body": body_stream}
-
-        download_result(mock_client, "cdm-lake", "prefix/", result_format="parquet")
-
-        mock_client.get_object.assert_called_once_with(
-            Bucket="cdm-lake", Key="prefix/result.parquet"
         )
 
     def test_download_empty_result(self):

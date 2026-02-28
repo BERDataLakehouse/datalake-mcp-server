@@ -322,9 +322,11 @@ class TestConstructUserSparkConnectUrl:
             with patch.dict("os.environ", {"K8S_ENVIRONMENT": "dev"}, clear=False):
                 with patch(
                     "os.getenv",
-                    side_effect=lambda k, d=None: None
-                    if k == "SPARK_CONNECT_URL_TEMPLATE"
-                    else ("dev" if k == "K8S_ENVIRONMENT" else d),
+                    side_effect=lambda k, d=None: (
+                        None
+                        if k == "SPARK_CONNECT_URL_TEMPLATE"
+                        else ("dev" if k == "K8S_ENVIRONMENT" else d)
+                    ),
                 ):
                     url = construct_user_spark_connect_url("myuser")
 
@@ -335,9 +337,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL construction with prod environment."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("prod" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("prod" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("produser")
 
@@ -352,9 +356,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that Kubernetes URL sanitizes usernames with underscores."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("tian_gu_test")
 
@@ -365,9 +371,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that Kubernetes URL sanitizes mixed-case usernames."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("Jeff_Cohere")
 
@@ -378,9 +386,11 @@ class TestConstructUserSparkConnectUrl:
         """Test that DNS-compliant usernames are preserved as-is."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("dev" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("dev" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("tgu2")
 
@@ -391,9 +401,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL with prod environment and username sanitization."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("prod" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("prod" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("user_name_test")
 
@@ -403,9 +415,11 @@ class TestConstructUserSparkConnectUrl:
         """Test Kubernetes URL with stage environment and username sanitization."""
         with patch(
             "os.getenv",
-            side_effect=lambda k, d=None: None
-            if k == "SPARK_CONNECT_URL_TEMPLATE"
-            else ("stage" if k == "K8S_ENVIRONMENT" else d),
+            side_effect=lambda k, d=None: (
+                None
+                if k == "SPARK_CONNECT_URL_TEMPLATE"
+                else ("stage" if k == "K8S_ENVIRONMENT" else d)
+            ),
         ):
             url = construct_user_spark_connect_url("test_user")
 

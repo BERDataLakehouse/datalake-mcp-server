@@ -437,9 +437,6 @@ class JobRecord(BaseModel):
     has_more: Annotated[
         bool | None, Field(description="Whether more rows are available")
     ] = None
-    result_format: Annotated[
-        str, Field(description="Result file format (json or parquet)")
-    ] = "json"
 
 
 class AsyncQuerySubmitRequest(BaseModel):

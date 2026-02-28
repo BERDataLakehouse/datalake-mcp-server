@@ -2,7 +2,9 @@
 API routes for async query execution.
 
 Provides endpoints for submitting long-running Spark SQL queries,
-polling job status, and retrieving results via presigned S3 URLs.
+polling job status, and retrieving results inline (same format as
+the sync query endpoint). Results are stored temporarily in S3/MinIO
+and returned to the client on retrieval, then deleted.
 
 All routes are under /delta/tables/query/async/ to sit alongside
 the existing sync /delta/tables/query endpoint.
@@ -72,8 +74,9 @@ def _validate_job_access(job: JobRecord, username: str) -> None:
     summary="Submit an async query",
     description=(
         "Submits a Spark SQL query for asynchronous execution. "
-        "Returns a job_id immediately. Results are written to S3/MinIO "
-        "and can be retrieved via presigned URLs once the job completes. "
+        "Returns a job_id immediately. Poll /{job_id}/status to track "
+        "progress, then call /{job_id}/results to retrieve the data "
+        "inline (same format as the sync query endpoint). "
         "Supports pagination with limit (max 5000) and offset parameters."
     ),
     operation_id="submit_async_query",
@@ -245,9 +248,7 @@ async def get_async_query_results(
     bucket = s3_client.ASYNC_QUERY_RESULT_BUCKET
 
     def _download_result():
-        return s3_client.download_result(
-            client, bucket, result_prefix, job.result_format or "json"
-        )
+        return s3_client.download_result(client, bucket, result_prefix)
 
     result = await asyncio.to_thread(_download_result)
 

@@ -50,7 +50,6 @@ def sample_job():
         limit=1000,
         offset=0,
         created_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
-        result_format="json",
     )
 
 
@@ -114,7 +113,6 @@ class TestSerialization:
         assert deserialized.limit == sample_job.limit
         assert deserialized.offset == sample_job.offset
         assert deserialized.created_at == sample_job.created_at
-        assert deserialized.result_format == sample_job.result_format
 
     def test_serialize_with_all_fields(self):
         """Serialization handles all optional fields."""
@@ -133,7 +131,6 @@ class TestSerialization:
             row_count=42,
             total_count=100,
             has_more=True,
-            result_format="parquet",
         )
 
         serialized = _serialize_job(job)
@@ -145,7 +142,6 @@ class TestSerialization:
         assert deserialized.row_count == 42
         assert deserialized.total_count == 100
         assert deserialized.has_more is True
-        assert deserialized.result_format == "parquet"
 
     def test_deserialize_from_bytes(self, sample_job):
         """Deserialization handles bytes input."""

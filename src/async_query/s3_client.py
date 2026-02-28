@@ -3,9 +3,9 @@ S3/MinIO client utilities for async query result storage.
 
 Provides functions for:
 - Creating boto3 S3 clients configured for MinIO
-- Generating presigned URLs for result files
-- Writing job metadata alongside results
+- Uploading and downloading query result files
 - Building user-scoped result paths
+- Cleaning up result prefixes after retrieval
 """
 
 from __future__ import annotations
@@ -21,12 +21,6 @@ from botocore.config import Config
 logger = logging.getLogger(__name__)
 
 ASYNC_QUERY_RESULT_BUCKET = os.getenv("ASYNC_QUERY_RESULT_BUCKET", "cdm-lake")
-ASYNC_QUERY_PRESIGNED_URL_EXPIRY = int(
-    os.getenv("ASYNC_QUERY_PRESIGNED_URL_EXPIRY", "3600")
-)
-
-# Files to exclude when generating presigned URLs for results
-_EXCLUDED_FILES = {"_SUCCESS", "_metadata.json", "_committed_", "_started_"}
 
 
 def create_s3_client(
@@ -119,88 +113,27 @@ def create_s3keep(
         logger.exception(f"Failed to create .s3keep at s3://{bucket}/{key}")
 
 
-def generate_presigned_urls(
-    s3_client: Any,
-    bucket: str,
-    prefix: str,
-    expires_in: int | None = None,
-) -> list[str]:
-    """
-    List objects under a prefix and generate presigned URLs for result files.
-
-    Excludes internal Spark files like _SUCCESS and _metadata.json.
-
-    Args:
-        s3_client: A configured boto3 S3 client.
-        bucket: S3 bucket name.
-        prefix: Key prefix to list objects under.
-        expires_in: Presigned URL expiry in seconds.
-
-    Returns:
-        List of presigned URLs for result data files.
-    """
-    if expires_in is None:
-        expires_in = ASYNC_QUERY_PRESIGNED_URL_EXPIRY
-
-    try:
-        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
-        contents = response.get("Contents", [])
-
-        urls = []
-        for obj in contents:
-            key = obj["Key"]
-            filename = key.rsplit("/", 1)[-1] if "/" in key else key
-
-            # Skip internal Spark/metadata files
-            if any(filename.startswith(exc) for exc in _EXCLUDED_FILES):
-                continue
-            # Skip empty directory markers
-            if obj.get("Size", 0) == 0:
-                continue
-
-            url = s3_client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=expires_in,
-            )
-            urls.append(url)
-
-        logger.info(
-            f"Generated {len(urls)} presigned URLs for bucket={bucket} prefix={prefix}"
-        )
-        return urls
-    except Exception:
-        logger.exception(
-            f"Failed to generate presigned URLs for bucket={bucket} prefix={prefix}"
-        )
-        raise
-
-
 def upload_result(
     s3_client: Any,
     bucket: str,
     prefix: str,
     data: str,
-    result_format: str = "json",
 ) -> None:
     """
-    Upload query result data to S3 as a single file.
+    Upload query result data to S3 as a single JSON file.
 
     Args:
         s3_client: A configured boto3 S3 client.
         bucket: S3 bucket name.
         prefix: Key prefix (result directory).
         data: Serialized result data (JSON string).
-        result_format: Output format ("json" or "parquet").
     """
-    key = f"{prefix}result.{result_format}"
+    key = f"{prefix}result.json"
     s3_client.put_object(
         Bucket=bucket,
         Key=key,
         Body=data.encode("utf-8"),
-        ContentType="application/json"
-        if result_format == "json"
-        else "application/octet-stream",
+        ContentType="application/json",
     )
     logger.info(f"Uploaded result to s3://{bucket}/{key}")
 
@@ -209,7 +142,6 @@ def download_result(
     s3_client: Any,
     bucket: str,
     prefix: str,
-    result_format: str = "json",
 ) -> list[dict[str, Any]]:
     """
     Download query result data from S3 and return as a list of dicts.
@@ -218,12 +150,11 @@ def download_result(
         s3_client: A configured boto3 S3 client.
         bucket: S3 bucket name.
         prefix: Key prefix (result directory).
-        result_format: Output format ("json" or "parquet").
 
     Returns:
         List of row dictionaries (the query result).
     """
-    key = f"{prefix}result.{result_format}"
+    key = f"{prefix}result.json"
     response = s3_client.get_object(Bucket=bucket, Key=key)
     body = response["Body"].read().decode("utf-8")
     return json.loads(body)

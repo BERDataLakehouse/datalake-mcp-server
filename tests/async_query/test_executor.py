@@ -169,16 +169,16 @@ class TestExecuteQuery:
             mock_s3.create_s3keep.assert_any_call(mock_client, "cdm-lake", "root/")
 
     @pytest.mark.asyncio
-    async def test_execute_query_called_via_to_thread(
+    async def test_all_blocking_calls_use_to_thread(
         self, executor, submit_kwargs, mock_query_response
     ):
-        """execute_query is called via asyncio.to_thread."""
+        """All blocking I/O (job_store, s3_client, execute_query) goes through to_thread."""
         with (
             patch(
                 "src.async_query.executor.asyncio.to_thread",
                 new_callable=AsyncMock,
             ) as mock_to_thread,
-            patch("src.async_query.executor.job_store"),
+            patch("src.async_query.executor.job_store") as mock_job_store,
             patch("src.async_query.executor.s3_client") as mock_s3,
         ):
             mock_to_thread.return_value = mock_query_response
@@ -189,9 +189,20 @@ class TestExecuteQuery:
 
             await executor._execute_query(**submit_kwargs)
 
-            mock_to_thread.assert_called_once()
-            call_args = mock_to_thread.call_args
-            assert call_args.args[0] is execute_query
+            # All blocking calls should go through to_thread:
+            # 1) update_job_status(RUNNING)
+            # 2) create_s3keep (result prefix)
+            # 3) create_s3keep (root prefix)
+            # 4) execute_query
+            # 5) upload_result
+            # 6) update_job_status(SUCCEEDED)
+            assert mock_to_thread.call_count == 6
+
+            called_funcs = [c.args[0] for c in mock_to_thread.call_args_list]
+            assert mock_job_store.update_job_status in called_funcs
+            assert mock_s3.create_s3keep in called_funcs
+            assert execute_query in called_funcs
+            assert mock_s3.upload_result in called_funcs
 
     @pytest.mark.asyncio
     async def test_result_uploaded_to_s3(
@@ -301,15 +312,27 @@ class TestShutdown:
 
     @pytest.mark.asyncio
     async def test_shutdown_cancels_tasks(self, executor):
-        """Shutdown cancels all active tasks."""
-        task1 = MagicMock()
-        task2 = MagicMock()
+        """Shutdown cancels all active tasks and awaits them."""
+        cancel_seen = {"job-1": False, "job-2": False}
+
+        async def hang(job_id):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancel_seen[job_id] = True
+
+        task1 = asyncio.create_task(hang("job-1"))
+        task2 = asyncio.create_task(hang("job-2"))
+        # Let tasks start and reach their await point
+        await asyncio.sleep(0)
+
         executor._active_tasks = {"job-1": task1, "job-2": task2}
 
         await executor.shutdown()
 
-        task1.cancel.assert_called_once()
-        task2.cancel.assert_called_once()
+        assert cancel_seen["job-1"] is True
+        assert cancel_seen["job-2"] is True
+        assert len(executor._active_tasks) == 0
 
     @pytest.mark.asyncio
     async def test_shutdown_no_pool(self, executor):

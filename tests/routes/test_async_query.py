@@ -95,7 +95,6 @@ def sample_succeeded_job():
         total_count=100,
         has_more=True,
         result_path="s3a://cdm-lake/prefix/",
-        result_format="json",
     )
 
 
@@ -110,7 +109,6 @@ def sample_pending_job():
         limit=1000,
         offset=0,
         created_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
-        result_format="json",
     )
 
 

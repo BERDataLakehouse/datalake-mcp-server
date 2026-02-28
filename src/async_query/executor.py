@@ -109,7 +109,8 @@ class AsyncQueryExecutor:
         )
         try:
             # 1. Update status to RUNNING
-            job_store.update_job_status(
+            await asyncio.to_thread(
+                job_store.update_job_status,
                 client,
                 job_id,
                 JobStatus.RUNNING,
@@ -118,14 +119,14 @@ class AsyncQueryExecutor:
             )
 
             # 2. Ensure directory structure exists
-
-            # Create .s3keep in job directory
             result_prefix = s3_client.build_result_path(user, job_id)
-            s3_client.create_s3keep(client, bucket, result_prefix)
-
-            # Create .s3keep in parent query_result directory
             root_prefix = s3_client.build_query_result_root_path(user)
-            s3_client.create_s3keep(client, bucket, root_prefix)
+            await asyncio.to_thread(
+                s3_client.create_s3keep, client, bucket, result_prefix
+            )
+            await asyncio.to_thread(
+                s3_client.create_s3keep, client, bucket, root_prefix
+            )
 
             # 3. Execute query — same function and timeouts as the sync path
             response = await asyncio.to_thread(
@@ -139,13 +140,14 @@ class AsyncQueryExecutor:
             )
 
             # 4. Write result to S3 via boto3
-            # result_prefix is already defined above
             result_json = json.dumps(response.result)
-            # client is already created above
-            s3_client.upload_result(client, bucket, result_prefix, result_json)
+            await asyncio.to_thread(
+                s3_client.upload_result, client, bucket, result_prefix, result_json
+            )
 
             # 5. Update status to SUCCEEDED
-            job_store.update_job_status(
+            await asyncio.to_thread(
+                job_store.update_job_status,
                 client,
                 job_id,
                 JobStatus.SUCCEEDED,
@@ -166,7 +168,8 @@ class AsyncQueryExecutor:
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"Async query failed: job_id={job_id} error={error_msg}")
-            job_store.update_job_status(
+            await asyncio.to_thread(
+                job_store.update_job_status,
                 client,
                 job_id,
                 JobStatus.FAILED,
@@ -180,12 +183,26 @@ class AsyncQueryExecutor:
 
     async def shutdown(self) -> None:
         """
-        Graceful shutdown: cancel active tasks.
+        Graceful shutdown: cancel all active tasks and await their completion.
+
+        Takes a snapshot of _active_tasks before iterating to avoid
+        RuntimeError from concurrent dict mutation in _execute_query's
+        finally block.
         """
+        if not self._active_tasks:
+            logger.info("No active async query tasks to cancel")
+            return
+
+        tasks_snapshot = list(self._active_tasks.items())
         logger.info(
-            f"Shutting down AsyncQueryExecutor ({len(self._active_tasks)} active tasks)"
+            f"Shutting down AsyncQueryExecutor ({len(tasks_snapshot)} active tasks)"
         )
-        for job_id, task in self._active_tasks.items():
+        for job_id, task in tasks_snapshot:
             logger.info(f"Cancelling async query task: job_id={job_id}")
             task.cancel()
+
+        await asyncio.gather(
+            *(task for _, task in tasks_snapshot), return_exceptions=True
+        )
+        self._active_tasks.clear()
         logger.info("AsyncQueryExecutor shutdown complete")
