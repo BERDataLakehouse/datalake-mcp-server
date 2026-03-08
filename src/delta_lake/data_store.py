@@ -16,6 +16,7 @@ Uses berdl_notebook_utils for shared functionality with the notebook environment
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 
 from pyspark.sql import SparkSession
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Catalogs to exclude from Iceberg listing (non-Iceberg catalogs)
 _EXCLUDED_CATALOGS = {"spark_catalog"}
 
+# Pattern to extract catalog name from spark.sql.catalog.<name> keys
+# Matches top-level catalog registration keys only (no sub-properties)
+_CATALOG_KEY_PATTERN = re.compile(r"^spark\.sql\.catalog\.([a-zA-Z_][a-zA-Z0-9_]*)$")
+
 
 def _format_output(data: Any, return_json: bool = True) -> Union[str, Any]:
     """Format the output based on the return_json flag."""
@@ -32,9 +37,29 @@ def _format_output(data: Any, return_json: bool = True) -> Union[str, Any]:
 
 
 def _list_iceberg_catalogs(spark: SparkSession) -> List[str]:
-    """List all Iceberg catalogs (excluding spark_catalog)."""
-    rows = spark.sql("SHOW CATALOGS").collect()
-    return sorted(c["catalog"] for c in rows if c["catalog"] not in _EXCLUDED_CATALOGS)
+    """List all Iceberg catalogs (excluding spark_catalog).
+
+    In Spark 4.0 with Spark Connect, ``SHOW CATALOGS`` only returns catalogs
+    registered in the client session's CatalogManager. Catalogs configured
+    server-side (via ``spark-defaults.conf``) are accessible for queries but
+    invisible to ``SHOW CATALOGS``.
+
+    This function discovers catalogs by inspecting the Spark SQL configuration
+    via the ``SET`` command, which returns all server-side configs through the
+    Spark Connect gRPC channel. It looks for top-level
+    ``spark.sql.catalog.<name>`` keys to identify registered catalogs.
+    """
+    rows = spark.sql("SET").collect()
+    catalog_names = set()
+    for row in rows:
+        match = _CATALOG_KEY_PATTERN.match(row["key"])
+        if match:
+            catalog_names.add(match.group(1))
+    logger.info(
+        f"Discovered {len(catalog_names)} catalog(s) from Spark config: "
+        f"{sorted(catalog_names)}"
+    )
+    return sorted(c for c in catalog_names if c not in _EXCLUDED_CATALOGS)
 
 
 def get_databases(
@@ -64,6 +89,7 @@ def get_databases(
         )
 
     catalogs = _list_iceberg_catalogs(spark)
+    logger.info(f"Found {len(catalogs)} Iceberg catalog(s): {catalogs}")
 
     databases = []
     for catalog in catalogs:
@@ -71,9 +97,8 @@ def get_databases(
             namespaces = spark.sql(f"SHOW NAMESPACES IN {catalog}").collect()
             for row in namespaces:
                 databases.append(f"{catalog}.{row['namespace']}")
-        except Exception:
-            # Catalog may not be accessible or may have no namespaces
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to list namespaces in catalog '{catalog}': {e}")
 
     return _format_output(sorted(databases), return_json)
 

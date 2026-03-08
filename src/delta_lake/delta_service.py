@@ -260,7 +260,7 @@ def count_delta_table(
             return cached_result[0]["count"]
 
     _check_exists(database, table, spark)
-    full_table_name = f"`{database}`.`{table}`"
+    full_table_name = f"{database}.`{table}`"
     logger.info(f"Counting rows in {full_table_name}")
     try:
         # Use timeout wrapper for count operation
@@ -331,7 +331,7 @@ def sample_delta_table(
         raise ValueError(f"Limit must be between 1 and {MAX_SAMPLE_ROWS}, got {limit}")
 
     _check_exists(database, table, spark)
-    full_table_name = f"`{database}`.`{table}`"
+    full_table_name = f"{database}.`{table}`"
     logger.info(f"Sampling {limit} rows from {full_table_name}")
     try:
         df = spark.table(full_table_name)
@@ -633,10 +633,19 @@ def query_delta_table(
 # Valid identifier pattern: alphanumeric and underscores only
 VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+# Database identifier pattern: allows catalog.namespace format (e.g., "my.demo")
+# Each component must be a valid identifier separated by dots
+VALID_DATABASE_PATTERN = re.compile(
+    r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$"
+)
+
 
 def _validate_identifier(name: str, identifier_type: str = "identifier") -> None:
     """
     Validate that an identifier (table, column, database name) is safe.
+
+    For database identifiers, dots are allowed to support Iceberg's
+    ``catalog.namespace`` format (e.g., ``my.demo``).
 
     Args:
         name: The identifier to validate.
@@ -645,7 +654,12 @@ def _validate_identifier(name: str, identifier_type: str = "identifier") -> None
     Raises:
         SparkQueryError: If the identifier is invalid.
     """
-    if not name or not VALID_IDENTIFIER_PATTERN.match(name):
+    pattern = (
+        VALID_DATABASE_PATTERN
+        if identifier_type == "database"
+        else VALID_IDENTIFIER_PATTERN
+    )
+    if not name or not pattern.match(name):
         raise SparkQueryError(
             f"Invalid {identifier_type}: '{name}'. "
             "Identifiers must start with a letter or underscore and contain "
@@ -810,7 +824,7 @@ def _build_join_clause(join: JoinClause, main_table: str) -> str:
     _validate_identifier(join.on_left_column, "join left column")
     _validate_identifier(join.on_right_column, "join right column")
 
-    join_table = f"`{join.database}`.`{join.table}`"
+    join_table = f"{join.database}.`{join.table}`"
     join_type = join.join_type
 
     return (
@@ -859,7 +873,7 @@ def build_select_query(
         select_clause = f"SELECT {distinct_keyword}" + ", ".join(select_parts)
 
     # Build FROM clause
-    main_table = f"`{request.database}`.`{request.table}`"
+    main_table = f"{request.database}.`{request.table}`"
     from_clause = f" FROM {main_table}"
 
     # Build JOIN clauses
