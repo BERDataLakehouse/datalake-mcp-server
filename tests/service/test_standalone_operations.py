@@ -423,9 +423,6 @@ class TestListDatabasesSubprocess:
         ):
             result = list_databases_subprocess(
                 mock_settings_dict,
-                use_hms=True,
-                filter_by_namespace=False,
-                auth_token=None,
             )
 
             assert result == ["db1", "db2"]
@@ -458,7 +455,6 @@ class TestListTablesSubprocess:
             result = list_tables_subprocess(
                 mock_settings_dict,
                 "test_db",
-                use_hms=True,
             )
 
             assert result == ["table1", "table2"]
@@ -525,7 +521,6 @@ class TestGetDbStructureSubprocess:
             result = get_db_structure_subprocess(
                 mock_settings_dict,
                 with_schema=False,
-                use_hms=True,
             )
 
             assert result == structure

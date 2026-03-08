@@ -108,6 +108,21 @@ class BERDLSettings(BaseSettings):
         default=None, description="Pod IP for legacy Spark mode"
     )
 
+    # Polaris Iceberg Catalog configuration
+    POLARIS_CATALOG_URI: AnyHttpUrl | None = Field(
+        default=None,
+        description="Polaris REST Catalog endpoint (e.g., http://polaris:8181/api/catalog)",
+    )
+    POLARIS_CREDENTIAL: str | None = Field(
+        default=None, description="Polaris client_id:client_secret credential"
+    )
+    POLARIS_PERSONAL_CATALOG: str | None = Field(
+        default=None, description="Polaris personal catalog name (e.g., user_tgu2)"
+    )
+    POLARIS_TENANT_CATALOGS: str | None = Field(
+        default=None, description="Comma-separated Polaris tenant catalog names"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> BERDLSettings:
