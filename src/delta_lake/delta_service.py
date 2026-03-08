@@ -170,13 +170,13 @@ def _check_query_is_valid(query: str) -> bool:
     return True
 
 
-def _check_exists(database: str, table: str) -> bool:
+def _check_exists(database: str, table: str, spark: SparkSession) -> bool:
     """
     Check if a table exists in a database.
     """
-    if not database_exists(database):
+    if not database_exists(database, spark=spark):
         raise DeltaDatabaseNotFoundError(f"Database [{database}] not found")
-    if not table_exists(database, table):
+    if not table_exists(database, table, spark=spark):
         raise DeltaTableNotFoundError(
             f"Table [{table}] not found in database [{database}]"
         )
@@ -259,7 +259,7 @@ def count_delta_table(
             logger.info(f"Cache hit for count on {database}.{table}")
             return cached_result[0]["count"]
 
-    _check_exists(database, table)
+    _check_exists(database, table, spark)
     full_table_name = f"`{database}`.`{table}`"
     logger.info(f"Counting rows in {full_table_name}")
     try:
@@ -330,7 +330,7 @@ def sample_delta_table(
     if not 0 < limit <= MAX_SAMPLE_ROWS:
         raise ValueError(f"Limit must be between 1 and {MAX_SAMPLE_ROWS}, got {limit}")
 
-    _check_exists(database, table)
+    _check_exists(database, table, spark)
     full_table_name = f"`{database}`.`{table}`"
     logger.info(f"Sampling {limit} rows from {full_table_name}")
     try:
@@ -866,8 +866,6 @@ def build_select_query(
     join_clauses = ""
     if request.joins:
         for join in request.joins:
-            # Validate join table exists
-            _check_exists(join.database, join.table)
             join_clauses += _build_join_clause(join, request.table)
 
     # Build WHERE clause
@@ -953,7 +951,12 @@ def select_from_delta_table(
             )
 
     # Validate main table exists
-    _check_exists(request.database, request.table)
+    _check_exists(request.database, request.table, spark)
+
+    # Validate join tables exist
+    if request.joins:
+        for join in request.joins:
+            _check_exists(join.database, join.table, spark)
 
     # Build and execute count query (without pagination) for total count
     count_query = f"SELECT COUNT(*) as cnt FROM ({build_select_query(request, include_pagination=False)})"
