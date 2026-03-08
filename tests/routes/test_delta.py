@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import _extract_token_from_request, router
+from src.routes.delta import router
 from src.service.dependencies import SparkContext, get_spark_context, auth
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
@@ -343,58 +343,18 @@ class TestListDatabasesEndpoint:
         client = TestClient(app)
 
         with patch(
-            "src.routes.delta.data_store.get_databases", return_value=["db1", "db2"]
+            "src.routes.delta.data_store.get_databases",
+            return_value=["my.demo", "kbase.shared"],
         ):
-            # Explicitly disable filter_by_namespace as it defaults to True
             response = client.post(
                 "/delta/databases/list",
-                json={"use_hms": True, "filter_by_namespace": False},
+                json={},
             )
 
         assert response.status_code == 200
         data = response.json()
         assert "databases" in data
-        assert data["databases"] == ["db1", "db2"]
-
-    def test_list_databases_with_namespace_filter(
-        self, mock_spark_session, mock_kbase_user
-    ):
-        """Test database listing with namespace filter requires token."""
-        app = FastAPI()
-        app.include_router(router)
-
-        spark = mock_spark_session()
-        user = mock_kbase_user()
-
-        def mock_get_spark_ctx():
-            ctx = SparkContext(
-                spark=spark,
-                is_standalone_subprocess=False,
-                settings_dict={},
-                app_name="test_app",
-                username=user.user,
-            )
-            yield ctx
-
-        def mock_auth():
-            return user
-
-        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
-        app.dependency_overrides[auth] = mock_auth
-
-        client = TestClient(app)
-
-        # Without proper token, should fail
-        with patch(
-            "src.routes.delta.data_store.get_databases", return_value=["u_test__db"]
-        ):
-            response = client.post(
-                "/delta/databases/list",
-                json={"use_hms": True, "filter_by_namespace": False},  # Disable filter
-            )
-
-        # Without filter, should succeed
-        assert response.status_code == 200
+        assert data["databases"] == ["my.demo", "kbase.shared"]
 
 
 class TestListTablesEndpoint:
@@ -407,11 +367,10 @@ class TestListTablesEndpoint:
         with patch(
             "src.routes.delta.data_store.get_tables", return_value=["table1", "table2"]
         ):
-            with patch("src.routes.delta.get_settings", return_value=mock_settings):
-                response = client.post(
-                    "/delta/databases/tables/list",
-                    json={"database": "testdb", "use_hms": True},
-                )
+            response = client.post(
+                "/delta/databases/tables/list",
+                json={"database": "my.demo"},
+            )
 
         assert response.status_code == 200
         data = response.json()
@@ -422,7 +381,7 @@ class TestListTablesEndpoint:
         """Test that database field is required."""
         client, spark, user = delta_client
 
-        response = client.post("/delta/databases/tables/list", json={"use_hms": True})
+        response = client.post("/delta/databases/tables/list", json={})
 
         assert response.status_code == 422  # Validation error
 
@@ -865,42 +824,6 @@ class TestConcurrentRequests:
 
 
 # =============================================================================
-# Token Extraction Tests
-# =============================================================================
-
-
-class TestTokenExtraction:
-    """Tests for the _extract_token_from_request helper."""
-
-    def test_extract_valid_bearer_token(self):
-        """Test extracting valid Bearer token."""
-        request = MagicMock()
-        request.headers = {"Authorization": "Bearer my_token_12345"}
-
-        token = _extract_token_from_request(request)
-
-        assert token == "my_token_12345"
-
-    def test_extract_missing_header_returns_none(self):
-        """Test that missing header returns None."""
-        request = MagicMock()
-        request.headers = {}
-
-        token = _extract_token_from_request(request)
-
-        assert token is None
-
-    def test_extract_non_bearer_returns_none(self):
-        """Test that non-Bearer auth returns None."""
-        request = MagicMock()
-        request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
-
-        token = _extract_token_from_request(request)
-
-        assert token is None
-
-
-# =============================================================================
 # Standalone Subprocess Dispatch Tests
 # =============================================================================
 
@@ -939,7 +862,7 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/list",
-                json={"use_hms": True, "filter_by_namespace": False},
+                json={},
             )
 
         assert response.status_code == 200
@@ -977,7 +900,7 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/tables/list",
-                json={"database": "test_db", "use_hms": True},
+                json={"database": "test_db"},
             )
 
         assert response.status_code == 200
@@ -1053,7 +976,7 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={"with_schema": False},
             )
 
         assert response.status_code == 200
