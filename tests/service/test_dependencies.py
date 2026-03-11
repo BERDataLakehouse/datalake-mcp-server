@@ -2,7 +2,7 @@
 Tests for the FastAPI dependencies module.
 
 Tests cover:
-- read_user_minio_credentials() - file reading, error handling
+- fetch_user_minio_credentials() - API-based credential fetch
 - get_user_from_request() - user extraction from request state
 - get_spark_session() - session creation, fallback logic, cleanup
 - is_spark_connect_reachable() - TCP check mocking
@@ -10,19 +10,17 @@ Tests cover:
 - Concurrent session creation
 """
 
-import json
 import socket
 import threading
 import time
-from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 import grpc
 import pytest
 
 from src.service.dependencies import (
     SparkContext,
-    read_user_minio_credentials,
+    fetch_user_minio_credentials,
     get_token_from_request,
     get_user_from_request,
     construct_user_spark_connect_url,
@@ -36,103 +34,99 @@ from src.service.dependencies import (
 
 
 # =============================================================================
-# Test read_user_minio_credentials
+# Test fetch_user_minio_credentials
 # =============================================================================
 
 
-class TestReadUserMinioCredentials:
-    """Tests for the read_user_minio_credentials function."""
+class TestFetchUserMinioCredentials:
+    """Tests for the fetch_user_minio_credentials function."""
 
-    def test_successful_credential_read(self, tmp_path):
-        """Test successfully reading credentials from file."""
-        creds_data = {
+    def test_successful_credential_fetch(self):
+        """Test successfully fetching credentials from governance API."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
             "username": "testuser",
             "access_key": "test_access_key",
             "secret_key": "test_secret_key",
         }
+        mock_response.raise_for_status = MagicMock()
 
-        # Create a temporary credentials file
-        creds_file = tmp_path / ".berdl_minio_credentials"
-        creds_file.write_text(json.dumps(creds_data))
+        with patch(
+            "src.service.dependencies.httpx.get", return_value=mock_response
+        ) as mock_get:
+            access_key, secret_key = fetch_user_minio_credentials(
+                "http://governance:8000", "test-token"
+            )
 
-        with patch.object(Path, "__new__", return_value=creds_file):
-            # We need to mock the path construction
-            with patch("src.service.dependencies.Path") as mock_path_class:
-                mock_path = MagicMock()
-                mock_path.exists.return_value = True
-                mock_path.__str__.return_value = str(creds_file)
-
-                # Mock the open call
-                with patch(
-                    "builtins.open",
-                    mock_open(read_data=json.dumps(creds_data)),
-                ):
-                    mock_path_class.return_value = mock_path
-                    access_key, secret_key = read_user_minio_credentials("testuser")
+            mock_get.assert_called_once_with(
+                "http://governance:8000/credentials/",
+                headers={"Authorization": "Bearer test-token"},
+                timeout=10.0,
+            )
 
         assert access_key == "test_access_key"
         assert secret_key == "test_secret_key"
 
-    def test_file_not_found_raises_error(self):
-        """Test that missing credentials file raises FileNotFoundError."""
-        with patch("src.service.dependencies.Path") as mock_path_class:
-            mock_path = MagicMock()
-            mock_path.exists.return_value = False
-            mock_path_class.return_value = mock_path
+    def test_api_error_raises_exception(self):
+        """Test that HTTP errors are propagated."""
+        import httpx
 
-            with pytest.raises(FileNotFoundError, match="credentials file not found"):
-                read_user_minio_credentials("nonexistent_user")
-
-    def test_invalid_json_raises_error(self):
-        """Test that invalid JSON raises ValueError."""
-        with patch("src.service.dependencies.Path") as mock_path_class:
-            mock_path = MagicMock()
-            mock_path.exists.return_value = True
-
-            mock_path_class.return_value = mock_path
-
-            with patch("builtins.open", mock_open(read_data="invalid json{")):
-                with pytest.raises(ValueError, match="Failed to parse"):
-                    read_user_minio_credentials("testuser")
+        with patch(
+            "src.service.dependencies.httpx.get",
+            side_effect=httpx.HTTPStatusError(
+                "401", request=MagicMock(), response=MagicMock()
+            ),
+        ):
+            with pytest.raises(httpx.HTTPStatusError):
+                fetch_user_minio_credentials("http://governance:8000", "bad-token")
 
     def test_missing_access_key_raises_error(self):
         """Test that missing access_key raises ValueError."""
-        creds_data = {"username": "testuser", "secret_key": "secret"}
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "username": "testuser",
+            "secret_key": "secret",
+        }
+        mock_response.raise_for_status = MagicMock()
 
-        with patch("src.service.dependencies.Path") as mock_path_class:
-            mock_path = MagicMock()
-            mock_path.exists.return_value = True
-            mock_path_class.return_value = mock_path
-
-            with patch("builtins.open", mock_open(read_data=json.dumps(creds_data))):
-                with pytest.raises(ValueError, match="Invalid credentials format"):
-                    read_user_minio_credentials("testuser")
+        with patch("src.service.dependencies.httpx.get", return_value=mock_response):
+            with pytest.raises(ValueError, match="missing access_key or secret_key"):
+                fetch_user_minio_credentials("http://governance:8000", "test-token")
 
     def test_missing_secret_key_raises_error(self):
         """Test that missing secret_key raises ValueError."""
-        creds_data = {"username": "testuser", "access_key": "access"}
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "username": "testuser",
+            "access_key": "access",
+        }
+        mock_response.raise_for_status = MagicMock()
 
-        with patch("src.service.dependencies.Path") as mock_path_class:
-            mock_path = MagicMock()
-            mock_path.exists.return_value = True
-            mock_path_class.return_value = mock_path
+        with patch("src.service.dependencies.httpx.get", return_value=mock_response):
+            with pytest.raises(ValueError, match="missing access_key or secret_key"):
+                fetch_user_minio_credentials("http://governance:8000", "test-token")
 
-            with patch("builtins.open", mock_open(read_data=json.dumps(creds_data))):
-                with pytest.raises(ValueError, match="Invalid credentials format"):
-                    read_user_minio_credentials("testuser")
+    def test_trailing_slash_in_url_handled(self):
+        """Test that trailing slash in governance URL is handled correctly."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "username": "testuser",
+            "access_key": "key",
+            "secret_key": "secret",
+        }
+        mock_response.raise_for_status = MagicMock()
 
-    def test_correct_path_constructed(self):
-        """Test that the correct path is constructed."""
-        with patch("src.service.dependencies.Path") as mock_path_class:
-            mock_path = MagicMock()
-            mock_path.exists.return_value = False
-            mock_path_class.return_value = mock_path
+        with patch(
+            "src.service.dependencies.httpx.get", return_value=mock_response
+        ) as mock_get:
+            fetch_user_minio_credentials("http://governance:8000/", "test-token")
 
-            with pytest.raises(FileNotFoundError):
-                read_user_minio_credentials("myuser")
-
-            # Verify path was constructed correctly
-            mock_path_class.assert_called_with("/home/myuser/.berdl_minio_credentials")
+            # Should not double the trailing slash
+            mock_get.assert_called_once_with(
+                "http://governance:8000/credentials/",
+                headers={"Authorization": "Bearer test-token"},
+                timeout=10.0,
+            )
 
 
 # =============================================================================
@@ -601,7 +595,7 @@ class TestGetSparkSession:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -641,7 +635,7 @@ class TestGetSparkSession:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -679,12 +673,14 @@ class TestGetSparkSession:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 side_effect=FileNotFoundError("Credentials not found"),
             ):
                 gen = get_spark_session(mock_request_obj, mock_settings)
 
-                with pytest.raises(Exception, match="MinIO credentials file not found"):
+                with pytest.raises(
+                    Exception, match="failed to fetch MinIO credentials"
+                ):
                     next(gen)
 
     def test_unauthenticated_user_raises_error(self, mock_request, mock_settings):
@@ -712,7 +708,7 @@ class TestGetSparkSession:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -753,7 +749,7 @@ class TestGetSparkSession:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -851,7 +847,7 @@ class TestConcurrentSparkSessions:
             side_effect=get_user_side_effect,
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -887,7 +883,7 @@ class TestConcurrentSparkSessions:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -940,7 +936,7 @@ class TestConcurrentSparkSessions:
             "src.service.dependencies.get_user_from_request", return_value="testuser"
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -1041,7 +1037,7 @@ class TestConcurrentSparkSessions:
             side_effect=get_user_mock,
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -1183,7 +1179,7 @@ class TestGetSparkContext:
                 return_value="tok-123",
             ),
             "creds": patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ),
             "url": patch(
@@ -1311,8 +1307,8 @@ class TestGetSparkContext:
 
     # ---- Credential errors ----
 
-    def test_file_not_found_credentials(self, mock_request, mock_settings):
-        """Missing credentials file raises with helpful message."""
+    def test_missing_auth_token_raises_error(self, mock_request, mock_settings):
+        """Missing auth token raises with helpful message."""
         req = mock_request(user="testuser")
 
         with patch(
@@ -1323,18 +1319,12 @@ class TestGetSparkContext:
                 "src.service.dependencies.get_token_from_request",
                 return_value=None,
             ):
-                with patch(
-                    "src.service.dependencies.read_user_minio_credentials",
-                    side_effect=FileNotFoundError("not found"),
-                ):
-                    gen = get_spark_context(req, mock_settings)
-                    with pytest.raises(
-                        Exception, match="MinIO credentials file not found"
-                    ):
-                        next(gen)
+                gen = get_spark_context(req, mock_settings)
+                with pytest.raises(Exception, match="no auth token available"):
+                    next(gen)
 
-    def test_generic_credential_error(self, mock_request, mock_settings):
-        """Non-FileNotFoundError credential failure propagates."""
+    def test_credential_fetch_error(self, mock_request, mock_settings):
+        """Credential fetch failure propagates with helpful message."""
         req = mock_request(user="testuser")
 
         with patch(
@@ -1343,15 +1333,15 @@ class TestGetSparkContext:
         ):
             with patch(
                 "src.service.dependencies.get_token_from_request",
-                return_value=None,
+                return_value="valid-token",
             ):
                 with patch(
-                    "src.service.dependencies.read_user_minio_credentials",
-                    side_effect=PermissionError("denied"),
+                    "src.service.dependencies.fetch_user_minio_credentials",
+                    side_effect=Exception("API connection refused"),
                 ):
                     gen = get_spark_context(req, mock_settings)
                     with pytest.raises(
-                        Exception, match="Error reading MinIO credentials"
+                        Exception, match="failed to fetch MinIO credentials"
                     ):
                         next(gen)
 
@@ -1378,8 +1368,8 @@ class TestGetSparkContext:
                 except StopIteration:
                     pass
 
-    def test_token_extraction_exception_swallowed(self, mock_request, mock_settings):
-        """get_token_from_request failure is swallowed (line 395-397)."""
+    def test_token_extraction_exception_raises(self, mock_request, mock_settings):
+        """get_token_from_request failure results in auth error since token is required."""
         req = mock_request(user="testuser")
 
         with patch(
@@ -1390,27 +1380,9 @@ class TestGetSparkContext:
                 "src.service.dependencies.get_token_from_request",
                 side_effect=Exception("header parse error"),
             ):
-                with patch(
-                    "src.service.dependencies.read_user_minio_credentials",
-                    return_value=("access", "secret"),
-                ):
-                    with patch(
-                        "src.service.dependencies.construct_user_spark_connect_url",
-                        return_value="sc://jupyter-testuser:15002",
-                    ):
-                        with patch(
-                            "src.service.dependencies.is_spark_connect_reachable",
-                            return_value=False,
-                        ):
-                            gen = get_spark_context(req, mock_settings)
-                            ctx = next(gen)
-
-                            assert ctx.auth_token is None
-
-                            try:
-                                next(gen)
-                            except StopIteration:
-                                pass
+                gen = get_spark_context(req, mock_settings)
+                with pytest.raises(Exception, match="no auth token available"):
+                    next(gen)
 
     def test_connect_mode_pod_ip_fallback(self, mock_request, mock_settings):
         """Connect mode fills in BERDL_POD_IP when empty (line 519)."""
@@ -1473,7 +1445,7 @@ class TestGetSparkSessionDeprecatedErrors:
     """Cover uncovered error branches in the deprecated get_spark_session."""
 
     def test_generic_credential_error(self, mock_request, mock_settings):
-        """Non-FileNotFoundError credential failure (line 642-643)."""
+        """Credential fetch failure propagates (line 642-643)."""
         req = mock_request(user="testuser")
 
         with patch(
@@ -1481,11 +1453,13 @@ class TestGetSparkSessionDeprecatedErrors:
             return_value="testuser",
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 side_effect=PermissionError("denied"),
             ):
                 gen = get_spark_session(req, mock_settings)
-                with pytest.raises(Exception, match="Error reading MinIO credentials"):
+                with pytest.raises(
+                    Exception, match="failed to fetch MinIO credentials"
+                ):
                     next(gen)
 
     def test_spark_connect_fails_falls_back(self, mock_request, mock_settings):
@@ -1498,7 +1472,7 @@ class TestGetSparkSessionDeprecatedErrors:
             return_value="testuser",
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -1544,7 +1518,7 @@ class TestGetSparkSessionDeprecatedErrors:
             return_value="testuser",
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(
@@ -1579,7 +1553,7 @@ class TestGetSparkSessionDeprecatedErrors:
             return_value="testuser",
         ):
             with patch(
-                "src.service.dependencies.read_user_minio_credentials",
+                "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
             ):
                 with patch(

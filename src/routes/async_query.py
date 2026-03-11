@@ -24,9 +24,10 @@ from src.async_query.executor import AsyncQueryExecutor
 from src.service.dependencies import (
     SparkContext,
     auth,
+    fetch_user_minio_credentials,
     get_spark_context,
+    get_token_from_request,
     get_user_from_request,
-    read_user_minio_credentials,
 )
 from src.service.exceptions import (
     JobAccessDeniedError,
@@ -163,8 +164,11 @@ async def get_async_query_status(
 ) -> AsyncQueryStatusResponse:
     """Get the status of an async query job."""
     username = get_user_from_request(http_request)
+    auth_token = get_token_from_request(http_request)
     settings = get_settings()
-    minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+    minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+        settings.GOVERNANCE_API_URL, auth_token
+    )
     client = s3_client.create_s3_client(
         endpoint_url=settings.MINIO_ENDPOINT_URL,
         access_key=minio_access_key,
@@ -216,8 +220,11 @@ async def get_async_query_results(
 ) -> TableQueryResponse:
     """Get async query results (same format as sync query endpoint)."""
     username = get_user_from_request(http_request)
+    auth_token = get_token_from_request(http_request)
     settings = get_settings()
-    minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+    minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+        settings.GOVERNANCE_API_URL, auth_token
+    )
     client = s3_client.create_s3_client(
         endpoint_url=settings.MINIO_ENDPOINT_URL,
         access_key=minio_access_key,
@@ -282,8 +289,11 @@ async def list_async_query_jobs(
 ) -> list[AsyncQueryStatusResponse]:
     """List all async query jobs for the current user."""
     username = get_user_from_request(http_request)
+    auth_token = get_token_from_request(http_request)
     settings = get_settings()
-    minio_access_key, minio_secret_key = read_user_minio_credentials(username)
+    minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+        settings.GOVERNANCE_API_URL, auth_token
+    )
     client = s3_client.create_s3_client(
         endpoint_url=settings.MINIO_ENDPOINT_URL,
         access_key=minio_access_key,

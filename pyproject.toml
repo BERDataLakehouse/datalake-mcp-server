@@ -16,6 +16,7 @@ dependencies = [
     "sqlparse==0.5.5",
     "ruff==0.15.1",
     "boto3>=1.40.70",
+    "httpx>=0.28.0",
     "berdl_notebook_utils",
 ]
 

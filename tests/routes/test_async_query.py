@@ -260,7 +260,7 @@ class TestGetAsyncQueryStatus:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_returns_job(
         self,
@@ -292,7 +292,7 @@ class TestGetAsyncQueryStatus:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_not_found(
         self,
@@ -318,7 +318,7 @@ class TestGetAsyncQueryStatus:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_access_denied(
         self,
@@ -361,7 +361,7 @@ class TestGetAsyncQueryResults:
     """Tests for the results endpoint."""
 
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.job_store")
     def test_results_returns_inline_data(
@@ -400,7 +400,7 @@ class TestGetAsyncQueryResults:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_not_ready(
         self,
@@ -428,7 +428,7 @@ class TestGetAsyncQueryResults:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_not_found(
         self,
@@ -454,7 +454,7 @@ class TestGetAsyncQueryResults:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_access_denied(
         self,
@@ -499,7 +499,7 @@ class TestListAsyncQueryJobs:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_list_jobs_returns_user_jobs(
         self,
@@ -540,7 +540,7 @@ class TestListAsyncQueryJobs:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_list_jobs_empty(
         self,
