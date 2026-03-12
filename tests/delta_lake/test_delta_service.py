@@ -394,7 +394,7 @@ class TestBuildSelectQuery:
         """Test SELECT * query."""
         request = TableSelectRequest(database="mydb", table="users")
         query = delta_service.build_select_query(request)
-        assert query == "SELECT * FROM mydb.`users` LIMIT 100 OFFSET 0"
+        assert query == "SELECT * FROM `mydb`.`users` LIMIT 100 OFFSET 0"
 
     def test_select_specific_columns(self):
         """Test SELECT with specific columns."""
@@ -530,7 +530,7 @@ class TestBuildSelectQuery:
         assert "SELECT `customer_id`, `category`" in query
         assert "SUM(`amount`) AS `total`" in query
         assert "COUNT(*) AS `order_count`" in query
-        assert "FROM sales.`orders`" in query
+        assert "FROM `sales`.`orders`" in query
         assert "WHERE `status` = 'completed'" in query
         assert "`created_at` >= '2023-01-01'" in query
         assert "GROUP BY `customer_id`, `category`" in query
@@ -1426,7 +1426,7 @@ class TestBuildJoinClause:
         result = delta_service._build_join_clause(join, "users")
 
         assert "INNER JOIN" in result
-        assert "other_db.`orders`" in result
+        assert "`other_db`.`orders`" in result
         assert "`users`.`user_id`" in result
         assert "`orders`.`customer_id`" in result
 
@@ -1496,7 +1496,7 @@ class TestBuildSelectQueryWithJoins:
         with patch("src.delta_lake.delta_service._check_exists", return_value=True):
             query = delta_service.build_select_query(request)
 
-        assert "INNER JOIN mydb.`orders`" in query
+        assert "INNER JOIN `mydb`.`orders`" in query
         assert "ON `users`.`id` = `orders`.`user_id`" in query
 
 

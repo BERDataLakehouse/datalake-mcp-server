@@ -3,7 +3,7 @@
 ## Table of Contents
 1. [Introduction](#introduction)
 2. [Quick Start](#quick-start)
-3. [Creating Sample Iceberg Tables](#creating-sample-iceberg-tables)
+3. [Creating Sample Delta Tables](#creating-sample-delta-tables)
 4. [Using the API](#using-the-api)
 5. [AI Assistant Integration](#ai-assistant-integration)
    - [MCP Configuration](#mcp-configuration)
@@ -12,16 +12,16 @@
 
 ## Introduction
 
-The BERDL Datalake MCP Server is a FastAPI-based service that enables AI assistants to interact with Iceberg tables stored in MinIO through Spark. It implements the Model Context Protocol (MCP) to provide LLM-accessible tools for data operations.
+The BERDL Datalake MCP Server is a FastAPI-based service that enables AI assistants to interact with Delta Lake tables stored in MinIO through Spark. It implements the Model Context Protocol (MCP) to provide LLM-accessible tools for data operations.
 
 > **⚠️ Important Warning:** 
 > 
-> This service allows arbitrary `read-oriented` queries to be executed against Iceberg tables. Query results will be sent to the model host server, unless you are hosting your model locally.
+> This service allows arbitrary `read-oriented` queries to be executed against Delta Lake tables. Query results will be sent to the model host server, unless you are hosting your model locally.
 
 > **❌** Additionally, this service is **NOT** approved for deployment to any production environment, including CI, until explicit approval is granted by KBase leadership. Use strictly for local development or evaluation purposes only.
 
 ### Key Features
-- List and explore Iceberg tables and databases (catalog namespaces)
+- List and explore Delta Lake tables and databases
 - Read table data and schemas
 - Execute SQL queries with safety constraints
 - Secure access control with KBase authentication
@@ -82,25 +82,25 @@ The BERDL Datalake MCP Server is a FastAPI-based service that enables AI assista
 
 **Note**: The MCP server is mounted at `/apis/mcp` by default. Set `SERVICE_ROOT_PATH=""` environment variable to serve at root.
 
-## Creating Sample Iceberg Tables
+## Creating Sample Delta Tables
 
 ### Option 1: Using Python Script
 
-You can create sample Iceberg tables directly using PySpark. Create a Python script with the following code:
+You can create sample Delta tables directly using PySpark. Create a Python script with the following code:
 ```python
 from pyspark.sql import SparkSession
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 import random
 
-# Create Spark session with Iceberg support (adjust configuration as needed)
+# Create Spark session (adjust configuration as needed)
 spark = SparkSession.builder \
     .appName("CreateSampleTables") \
-    .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .getOrCreate()
 
-# Create test namespace under your personal catalog
-# In BERDL, each user has a "my" catalog managed by Polaris
-namespace = "my.test"
+# Create test namespace
+namespace = 'test'
 spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
 
 # Create employees data
@@ -115,17 +115,23 @@ departments = ["Engineering", "Marketing", "Sales", "HR", "Finance"]
 data = []
 for i in range(1, 101):
     data.append((
-        i,
-        f"Employee {i}",
-        departments[random.randint(0, len(departments)-1)],
+        i, 
+        f"Employee {i}", 
+        departments[random.randint(0, len(departments)-1)], 
         random.randint(50000, 150000)
     ))
 
 employees_df = spark.createDataFrame(data, schema)
 employees_df.show(5)
 
-# Save employees table as Iceberg (catalog-driven, no explicit path needed)
-employees_df.writeTo(f"{namespace}.employees").createOrReplace()
+# Save employees table to S3 and Hive metastore
+(
+employees_df.write
+    .mode("overwrite")
+    .option("path", "s3a://cdm-lake/employees")
+    .format("delta")
+    .saveAsTable(f"{namespace}.employees")
+)
 
 # Create products data
 product_schema = StructType([
@@ -140,9 +146,9 @@ categories = ["Electronics", "Books", "Clothing", "Home", "Sports"]
 products = []
 for i in range(1, 51):
     products.append((
-        i,
-        f"Product {i}",
-        categories[random.randint(0, len(categories)-1)],
+        i, 
+        f"Product {i}", 
+        categories[random.randint(0, len(categories)-1)], 
         random.randint(10, 500),
         random.randint(0, 100)
     ))
@@ -150,15 +156,21 @@ for i in range(1, 51):
 product_df = spark.createDataFrame(products, product_schema)
 product_df.show(5)
 
-# Save products table as Iceberg
-product_df.writeTo(f"{namespace}.products").createOrReplace()
+# Save products table to S3 and Hive metastore
+(
+product_df.write
+    .mode("overwrite")
+    .option("path", "s3a://cdm-lake/products")
+    .format("delta")
+    .saveAsTable(f"{namespace}.products")
+)
 ```
 ### Option 2: Check and Create Bucket Manually
 
 1. Open MinIO Console at `http://localhost:9003`
 2. Login with user `minio` and password `minio123`
 3. Create a new bucket named `cdm-lake`
-4. Use this bucket for your Iceberg tables
+4. Use this bucket for your Delta tables
 
 ## Using the API
 
@@ -169,7 +181,7 @@ curl -X 'POST' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{}'
+  -d '{"use_hms": true}'
 ```
 
 #### List Tables
@@ -179,7 +191,7 @@ curl -X 'POST' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"database": "my.test"}'
+  -d '{"database": "default", "use_hms": true}'
 ```
 
 #### Get Table Schema
@@ -189,42 +201,42 @@ curl -X 'POST' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"database": "my.test", "table": "products"}'
+  -d '{"database": "default", "table": "products"}'
 ```
 
 #### Get Sample Data
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/apis/mcp/delta/databases/tables/sample' \
+  'http://localhost:8000/apis/mcp/delta/tables/sample' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"database": "my.test", "table": "products", "limit": 10}'
+  -d '{"database": "default", "table": "products", "limit": 10}'
 ```
 
 #### Count Table Rows
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/apis/mcp/delta/databases/tables/count' \
+  'http://localhost:8000/apis/mcp/delta/tables/count' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"database": "my.test", "table": "products"}'
+  -d '{"database": "default", "table": "products"}'
 ```
 
 #### Query Table
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/apis/mcp/delta/databases/tables/query' \
+  'http://localhost:8000/apis/mcp/delta/tables/query' \
   -H 'accept: application/json' \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer your-kbase-token-here' \
-  -d '{"query": "SELECT * FROM my.test.products WHERE price > 100 LIMIT 5"}'
+  -d '{"query": "SELECT * FROM test.products WHERE price > 100 LIMIT 5"}'
 ```
 
 ## AI Assistant Integration
 
-The BERDL Datalake MCP Server implements the Model Context Protocol (MCP), allowing AI assistants to interact with your Iceberg tables using natural language. This section explains how to configure and use the server with various MCP-compatible clients.
+The BERDL Datalake MCP Server implements the Model Context Protocol (MCP), allowing AI assistants to interact with your Delta Lake tables using natural language. This section explains how to configure and use the server with various MCP-compatible clients.
 
 > **⚠️ Reminder** 
 > 
@@ -296,7 +308,7 @@ Most MCP‑enabled tools offer two ways to configure a host:
 
 ### Example Prompts
 
-Once configured, you can interact with your Iceberg tables using natural language. Here are some example prompts:
+Once configured, you can interact with your Delta tables using natural language. Here are some example prompts:
 
 > **⚠️ Final Warning Before We Phone Home!**  
 > 
