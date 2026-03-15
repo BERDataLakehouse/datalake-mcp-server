@@ -118,6 +118,9 @@ async def submit_async_query(
         secure=settings.MINIO_SECURE,
     )
 
+    # Clean up stale jobs before checking limits — frees slots for new submissions
+    await asyncio.to_thread(job_store.cleanup_stale_jobs, client, username)
+
     # Enforce per-user concurrency limit
     active_count = await asyncio.to_thread(
         job_store.count_active_user_jobs, client, username

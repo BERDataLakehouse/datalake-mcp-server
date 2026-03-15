@@ -216,6 +216,15 @@ _STALE_JOB_TIMEOUT = (
 )
 
 
+def _is_stale(job: JobRecord) -> bool:
+    """Check if a PENDING/RUNNING job has exceeded the staleness threshold."""
+    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+        return False
+    reference_time = job.started_at or job.created_at
+    elapsed = (datetime.now(timezone.utc) - reference_time).total_seconds()
+    return elapsed > _STALE_JOB_TIMEOUT
+
+
 def expire_stale_job(client: Any, job: JobRecord) -> JobRecord:
     """
     Check whether a PENDING or RUNNING job has exceeded the query timeout
@@ -235,15 +244,11 @@ def expire_stale_job(client: Any, job: JobRecord) -> JobRecord:
     Returns:
         The (possibly updated) JobRecord.
     """
-    if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+    if not _is_stale(job):
         return job
 
     reference_time = job.started_at or job.created_at
     elapsed = (datetime.now(timezone.utc) - reference_time).total_seconds()
-
-    if elapsed <= _STALE_JOB_TIMEOUT:
-        return job
-
     error_msg = (
         f"Job timed out after {elapsed:.0f}s (threshold: {_STALE_JOB_TIMEOUT:.0f}s). "
         f"The background task likely crashed or was terminated."
@@ -263,3 +268,46 @@ def expire_stale_job(client: Any, job: JobRecord) -> JobRecord:
     job.completed_at = datetime.now(timezone.utc)
     job.error_message = error_msg
     return job
+
+
+def cleanup_stale_jobs(client: Any, user: str) -> int:
+    """
+    Find stale PENDING/RUNNING jobs and delete their entire S3 directory.
+
+    Called at submission time to free up slots before counting active jobs.
+    Jobs that have exceeded _STALE_JOB_TIMEOUT are considered abandoned
+    (background task crashed, OOM-killed, or lost during server restart)
+    and are deleted entirely — metadata, results, and .s3keep files.
+
+    Args:
+        client: boto3 S3 client.
+        user: KBase username.
+
+    Returns:
+        Number of stale jobs cleaned up.
+    """
+    jobs = list_user_jobs(client, user)
+    cleaned = 0
+
+    for job in jobs:
+        if not _is_stale(job):
+            continue
+
+        logger.warning(
+            f"Cleaning up stale job: job_id={job.job_id} user={user} "
+            f"status={job.status.value}"
+        )
+
+        result_prefix = s3_client.build_result_path(user, job.job_id)
+        try:
+            s3_client.delete_result_prefix(client, _BUCKET, result_prefix)
+            cleaned += 1
+        except Exception:
+            logger.exception(
+                f"Failed to clean up stale job directory: job_id={job.job_id}"
+            )
+
+    if cleaned:
+        logger.info(f"Cleaned up {cleaned} stale job(s) for user {user}")
+
+    return cleaned
