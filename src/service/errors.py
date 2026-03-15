@@ -76,6 +76,9 @@ class ErrorType(Enum):
     JOB_NOT_READY = (20130, "Job not ready")
     """ Results were requested before the job completed. """
 
+    JOB_FAILED = (20135, "Job failed")
+    """ The job failed and results are not available. """
+
     JOB_ACCESS_DENIED = (20140, "Job access denied")
     """ The user does not have access to the specified job. """
 

@@ -31,6 +31,7 @@ from src.service.dependencies import (
 )
 from src.service.exceptions import (
     JobAccessDeniedError,
+    JobFailedError,
     JobNotFoundError,
     JobNotReadyError,
     MissingTokenError,
@@ -204,6 +205,14 @@ async def get_async_query_status(
     # Expire stale PENDING/RUNNING jobs whose background task likely died
     job = await asyncio.to_thread(job_store.expire_stale_job, client, job)
 
+    # Clean up S3 artifacts for failed jobs so they don't linger
+    if job.status == JobStatus.FAILED:
+        result_prefix = s3_client.build_result_path(username, job_id)
+        bucket = s3_client.ASYNC_QUERY_RESULT_BUCKET
+        await asyncio.to_thread(
+            s3_client.delete_result_prefix, client, bucket, result_prefix
+        )
+
     return AsyncQueryStatusResponse(
         job_id=job.job_id,
         status=job.status,
@@ -260,6 +269,18 @@ async def get_async_query_results(
     # Expire stale PENDING/RUNNING jobs whose background task likely died
     job = await asyncio.to_thread(job_store.expire_stale_job, client, job)
 
+    result_prefix = s3_client.build_result_path(username, job_id)
+    bucket = s3_client.ASYNC_QUERY_RESULT_BUCKET
+
+    if job.status == JobStatus.FAILED:
+        # Clean up S3 artifacts for the failed job
+        await asyncio.to_thread(
+            s3_client.delete_result_prefix, client, bucket, result_prefix
+        )
+        raise JobFailedError(
+            job.error_message or f"Job '{job_id}' failed. No further details available."
+        )
+
     if job.status != JobStatus.SUCCEEDED:
         raise JobNotReadyError(
             f"Job '{job_id}' is not ready (status: {job.status.value}). "
@@ -267,19 +288,15 @@ async def get_async_query_results(
         )
 
     # Download result and clean up from S3
-    result_prefix = s3_client.build_result_path(username, job_id)
-    bucket = s3_client.ASYNC_QUERY_RESULT_BUCKET
-
     def _download_result():
         return s3_client.download_result(client, bucket, result_prefix)
 
     result = await asyncio.to_thread(_download_result)
 
     # Clean up the job's result files from MinIO (including _metadata.json)
-    def _cleanup():
-        s3_client.delete_result_prefix(client, bucket, result_prefix)
-
-    await asyncio.to_thread(_cleanup)
+    await asyncio.to_thread(
+        s3_client.delete_result_prefix, client, bucket, result_prefix
+    )
 
     # Build pagination info from job record
     pagination = PaginationInfo(

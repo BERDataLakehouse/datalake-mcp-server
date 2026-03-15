@@ -148,6 +148,12 @@ class JobNotReadyError(AsyncQueryError):
     """
 
 
+class JobFailedError(AsyncQueryError):
+    """
+    An error thrown when results are requested for a job that failed.
+    """
+
+
 class JobAccessDeniedError(AsyncQueryError):
     """
     An error thrown when a user tries to access another user's job.
