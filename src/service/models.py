@@ -53,21 +53,9 @@ class DeepHealthResponse(BaseModel):
 
 
 class DatabaseListRequest(BaseModel):
-    """Request model for listing databases."""
+    """Request model for listing databases from Iceberg catalogs."""
 
-    use_hms: Annotated[
-        bool,
-        Field(
-            description="Whether to use Hive Metastore client for faster metadata retrieval"
-        ),
-    ] = True
-
-    filter_by_namespace: Annotated[
-        bool,
-        Field(
-            description="Whether to filter databases by user/tenant namespace prefixes"
-        ),
-    ] = True
+    pass
 
 
 class DatabaseListResponse(BaseModel):
@@ -77,17 +65,11 @@ class DatabaseListResponse(BaseModel):
 
 
 class TableListRequest(BaseModel):
-    """Request model for listing tables in a database."""
+    """Request model for listing tables in an Iceberg namespace."""
 
     database: Annotated[
-        str, Field(description="Name of the database to list tables from")
+        str, Field(description="Namespace in catalog.namespace format (e.g., my.demo)")
     ]
-    use_hms: Annotated[
-        bool,
-        Field(
-            description="Whether to use Hive Metastore client for faster metadata retrieval"
-        ),
-    ] = True
 
 
 class TableListResponse(BaseModel):
@@ -99,10 +81,10 @@ class TableListResponse(BaseModel):
 
 
 class TableSchemaRequest(BaseModel):
-    """Request model for getting table schema."""
+    """Request model for getting table schema from an Iceberg catalog."""
 
     database: Annotated[
-        str, Field(description="Name of the database containing the table")
+        str, Field(description="Namespace in catalog.namespace format (e.g., my.demo)")
     ]
     table: Annotated[str, Field(description="Name of the table to get schema for")]
 
@@ -116,17 +98,11 @@ class TableSchemaResponse(BaseModel):
 
 
 class DatabaseStructureRequest(BaseModel):
-    """Request model for getting database structure."""
+    """Request model for getting Iceberg database structure."""
 
     with_schema: Annotated[
         bool, Field(description="Whether to include table schemas in the response")
     ] = False
-    use_hms: Annotated[
-        bool,
-        Field(
-            description="Whether to use Hive Metastore client for faster metadata retrieval"
-        ),
-    ] = True
 
 
 class DatabaseStructureResponse(BaseModel):
