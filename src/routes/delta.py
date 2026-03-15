@@ -1,5 +1,5 @@
 """
-API routes for Delta Lake / Iceberg operations.
+API routes for Delta Lake operations.
 
 Routes support full concurrency:
 - Spark Connect mode: Direct SparkSession usage
@@ -7,9 +7,9 @@ Routes support full concurrency:
 """
 
 import logging
-from typing import Annotated, Any, Dict, List, cast
+from typing import Annotated, Any, Dict, List, Optional, cast
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from src.delta_lake import data_store, delta_service
 from src.service.dependencies import SparkContext, auth, get_spark_context
@@ -24,6 +24,7 @@ from src.service.standalone_operations import (
     sample_table_subprocess,
     select_table_subprocess,
 )
+from src.settings import get_settings
 from src.service.models import (
     DatabaseListRequest,
     DatabaseListResponse,
@@ -48,35 +49,60 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/delta", tags=["Delta Lake"])
 
 
+def _extract_token_from_request(request: Request) -> Optional[str]:
+    """Extract the Bearer token from the request Authorization header."""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]  # Remove "Bearer " prefix
+    return None
+
+
 @router.post(
     "/databases/list",
     response_model=DatabaseListResponse,
     status_code=status.HTTP_200_OK,
-    summary="List all Iceberg namespaces",
-    description="Lists all accessible Iceberg namespaces across all catalogs. Returns namespaces in catalog.namespace format.",
+    summary="List all databases in the Hive metastore",
+    description="Lists all databases available in the Hive metastore, optionally using PostgreSQL for faster retrieval and filtered by user namespace.",
     operation_id="list_databases",
 )
 def list_databases(
     body: DatabaseListRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseListResponse:
     """
-    Endpoint to list all Iceberg namespaces across catalogs.
+    Endpoint to list all databases in the Hive metastore.
+    Optionally filters by user/tenant namespace prefixes.
     """
+    # Extract auth token for namespace filtering
+    auth_token = None
+    if body.filter_by_namespace:
+        auth_token = _extract_token_from_request(http_request)
+        if not auth_token:
+            raise ValueError("Authorization token required for namespace filtering")
+
     if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
         databases = run_in_spark_process(
             list_databases_subprocess,
             ctx.settings_dict,
+            use_hms=body.use_hms,
+            filter_by_namespace=body.filter_by_namespace,
+            auth_token=auth_token,
             app_name=ctx.app_name,
             operation_name="list_databases",
         )
     else:
+        # Use Spark Connect session directly
         databases = cast(
             list[str],
             data_store.get_databases(
                 spark=ctx.spark,
+                use_hms=body.use_hms,
                 return_json=False,
+                filter_by_namespace=body.filter_by_namespace,
+                auth_token=auth_token,
             ),
         )
 
@@ -87,8 +113,8 @@ def list_databases(
     "/databases/tables/list",
     response_model=TableListResponse,
     status_code=status.HTTP_200_OK,
-    summary="List tables in an Iceberg namespace",
-    description="Lists all tables in a specific Iceberg namespace (catalog.namespace format).",
+    summary="List tables in a database",
+    description="Lists all tables in a specific database, optionally using PostgreSQL for faster retrieval.",
     operation_id="list_database_tables",
 )
 def list_database_tables(
@@ -97,23 +123,29 @@ def list_database_tables(
     auth=Depends(auth),
 ) -> TableListResponse:
     """
-    Endpoint to list tables in a specific Iceberg namespace.
+    Endpoint to list tables in a specific database.
     """
     if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
         tables = run_in_spark_process(
             list_tables_subprocess,
             ctx.settings_dict,
             database=request.database,
+            use_hms=request.use_hms,
             app_name=ctx.app_name,
             operation_name="list_tables",
         )
     else:
+        # Use Spark Connect session directly
+        settings = get_settings()
         tables = cast(
             list[str],
             data_store.get_tables(
                 database=request.database,
                 spark=ctx.spark,
+                use_hms=request.use_hms,
                 return_json=False,
+                settings=settings,
             ),
         )
     return TableListResponse(tables=tables)
@@ -124,7 +156,7 @@ def list_database_tables(
     response_model=TableSchemaResponse,
     status_code=status.HTTP_200_OK,
     summary="Get table schema",
-    description="Gets the schema (column names) of a specific table in an Iceberg namespace.",
+    description="Gets the schema (column names) of a specific table in a database.",
     operation_id="get_table_schema",
 )
 def get_table_schema(
@@ -133,9 +165,10 @@ def get_table_schema(
     auth=Depends(auth),
 ) -> TableSchemaResponse:
     """
-    Endpoint to get the schema of a specific table.
+    Endpoint to get the schema of a specific table in a database.
     """
     if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
         columns = run_in_spark_process(
             get_table_schema_subprocess,
             ctx.settings_dict,
@@ -145,6 +178,7 @@ def get_table_schema(
             operation_name="get_table_schema",
         )
     else:
+        # Use Spark Connect session directly
         columns = cast(
             list[str],
             data_store.get_table_schema(
@@ -161,8 +195,8 @@ def get_table_schema(
     "/databases/structure",
     response_model=DatabaseStructureResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get Iceberg database structure",
-    description="Gets the complete structure of all Iceberg namespaces, optionally including table schemas.",
+    summary="Get database structure",
+    description="Gets the complete structure of all databases, optionally including table schemas.",
     operation_id="get_database_structure",
 )
 def get_database_structure(
@@ -171,23 +205,29 @@ def get_database_structure(
     auth=Depends(auth),
 ) -> DatabaseStructureResponse:
     """
-    Endpoint to get the complete structure of all Iceberg namespaces.
+    Endpoint to get the complete structure of all databases.
     """
     if ctx.is_standalone_subprocess:
+        # Dispatch to process pool for Standalone mode
         structure = run_in_spark_process(
             get_db_structure_subprocess,
             ctx.settings_dict,
             with_schema=request.with_schema,
+            use_hms=request.use_hms,
             app_name=ctx.app_name,
             operation_name="get_db_structure",
         )
     else:
+        # Use Spark Connect session directly
+        settings = get_settings()
         structure = cast(
             dict[str, list[str] | dict[str, list[str]]],
             data_store.get_db_structure(
                 spark=ctx.spark,
                 with_schema=request.with_schema,
+                use_hms=request.use_hms,
                 return_json=False,
+                settings=settings,
             ),
         )
     return DatabaseStructureResponse(structure=structure)

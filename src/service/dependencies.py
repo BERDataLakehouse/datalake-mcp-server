@@ -136,7 +136,7 @@ def fetch_user_minio_credentials(
     Raises:
         Exception: If the API call fails or returns invalid data
     """
-    url = f"{governance_api_url.rstrip('/')}/credentials/"
+    url = f"{str(governance_api_url).rstrip('/')}/credentials/"
     logger.debug(f"Fetching MinIO credentials from governance API: {url}")
 
     response = httpx.get(
