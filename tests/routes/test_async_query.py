@@ -328,6 +328,59 @@ class TestGetAsyncQueryStatus:
     @patch("src.routes.async_query.get_settings")
     @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
+    def test_status_failed_job_cleans_up_s3(
+        self,
+        mock_job_store,
+        mock_read_creds,
+        mock_get_settings,
+        mock_s3,
+        client,
+    ):
+        """Status for a FAILED job returns status and cleans up S3 artifacts."""
+        mock_read_creds.return_value = ("access_key", "secret_key")
+        mock_settings = MagicMock()
+        mock_settings.MINIO_ENDPOINT_URL = "localhost:9002"
+        mock_settings.MINIO_SECURE = False
+        mock_get_settings.return_value = mock_settings
+        mock_s3_client = MagicMock()
+        mock_s3.create_s3_client.return_value = mock_s3_client
+        mock_s3.build_result_path.return_value = (
+            "testuser/data/query_result/job-fail-1/"
+        )
+        mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+
+        failed_job = JobRecord(
+            job_id="job-fail-1",
+            user="testuser",
+            query="SELECT * FROM db.table",
+            status=JobStatus.FAILED,
+            limit=1000,
+            offset=0,
+            created_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
+            error_message="S3 AccessDeniedException: forbidden",
+        )
+        mock_job_store.get_job.return_value = failed_job
+        mock_job_store.expire_stale_job.side_effect = lambda client, job: job
+
+        with _patch_get_user("testuser"), _patch_require_token():
+            response = client.get("/delta/tables/query/async/job-fail-1/status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "FAILED"
+        assert "S3 AccessDeniedException" in data["error_message"]
+
+        # Verify S3 cleanup was called
+        mock_s3.delete_result_prefix.assert_called_once_with(
+            mock_s3_client,
+            "cdm-lake",
+            "testuser/data/query_result/job-fail-1/",
+        )
+
+    @patch("src.routes.async_query.s3_client")
+    @patch("src.routes.async_query.get_settings")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
+    @patch("src.routes.async_query.job_store")
     def test_status_access_denied(
         self,
         mock_job_store,
@@ -459,6 +512,100 @@ class TestGetAsyncQueryResults:
             response = client.get("/delta/tables/query/async/nonexistent/results")
 
         assert response.status_code == 404
+
+    @patch("src.routes.async_query.s3_client")
+    @patch("src.routes.async_query.get_settings")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
+    @patch("src.routes.async_query.job_store")
+    def test_results_failed_job_returns_error_and_cleans_up(
+        self,
+        mock_job_store,
+        mock_read_creds,
+        mock_get_settings,
+        mock_s3,
+        client,
+    ):
+        """Results for a FAILED job returns 409 with error_message and cleans up S3."""
+        mock_read_creds.return_value = ("access_key", "secret_key")
+        mock_settings = MagicMock()
+        mock_settings.MINIO_ENDPOINT_URL = "localhost:9002"
+        mock_settings.MINIO_SECURE = False
+        mock_get_settings.return_value = mock_settings
+        mock_s3_client = MagicMock()
+        mock_s3.create_s3_client.return_value = mock_s3_client
+        mock_s3.build_result_path.return_value = (
+            "testuser/data/query_result/job-fail-1/"
+        )
+        mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+
+        failed_job = JobRecord(
+            job_id="job-fail-1",
+            user="testuser",
+            query="SELECT * FROM db.table",
+            status=JobStatus.FAILED,
+            limit=1000,
+            offset=0,
+            created_at=datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc),
+            error_message="S3 AccessDeniedException: forbidden",
+        )
+        mock_job_store.get_job.return_value = failed_job
+        mock_job_store.expire_stale_job.side_effect = lambda client, job: job
+
+        with _patch_get_user("testuser"), _patch_require_token():
+            response = client.get("/delta/tables/query/async/job-fail-1/results")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert "S3 AccessDeniedException" in data["message"]
+
+        # Verify S3 cleanup was called
+        mock_s3.delete_result_prefix.assert_called_once_with(
+            mock_s3_client,
+            "cdm-lake",
+            "testuser/data/query_result/job-fail-1/",
+        )
+
+    @patch("src.routes.async_query.s3_client")
+    @patch("src.routes.async_query.get_settings")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
+    @patch("src.routes.async_query.job_store")
+    def test_results_failed_job_no_error_message(
+        self,
+        mock_job_store,
+        mock_read_creds,
+        mock_get_settings,
+        mock_s3,
+        client,
+    ):
+        """Results for a FAILED job with no error_message still returns 409."""
+        mock_read_creds.return_value = ("access_key", "secret_key")
+        mock_settings = MagicMock()
+        mock_settings.MINIO_ENDPOINT_URL = "localhost:9002"
+        mock_settings.MINIO_SECURE = False
+        mock_get_settings.return_value = mock_settings
+        mock_s3.create_s3_client.return_value = MagicMock()
+        mock_s3.build_result_path.return_value = "prefix/"
+        mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+
+        failed_job = JobRecord(
+            job_id="job-fail-2",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.FAILED,
+            limit=100,
+            offset=0,
+            created_at=datetime(2025, 1, 15, tzinfo=timezone.utc),
+            error_message=None,
+        )
+        mock_job_store.get_job.return_value = failed_job
+        mock_job_store.expire_stale_job.side_effect = lambda client, job: job
+
+        with _patch_get_user("testuser"), _patch_require_token():
+            response = client.get("/delta/tables/query/async/job-fail-2/results")
+
+        assert response.status_code == 409
+        data = response.json()
+        assert "failed" in data["message"].lower()
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")

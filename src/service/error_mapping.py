@@ -21,6 +21,7 @@ from src.service.exceptions import (
     InvalidS3PathError,
     InvalidTokenError,
     JobAccessDeniedError,
+    JobFailedError,
     JobNotFoundError,
     JobNotReadyError,
     TooManyJobsError,
@@ -80,6 +81,7 @@ _ERR_MAP = {
     # Async query errors
     JobNotFoundError: ErrorMapping(ErrorType.JOB_NOT_FOUND, _H404),
     JobNotReadyError: ErrorMapping(ErrorType.JOB_NOT_READY, _H409),
+    JobFailedError: ErrorMapping(ErrorType.JOB_FAILED, _H409),
     JobAccessDeniedError: ErrorMapping(ErrorType.JOB_ACCESS_DENIED, _H403),
     TooManyJobsError: ErrorMapping(ErrorType.TOO_MANY_JOBS, _H429),
     AsyncQueryError: ErrorMapping(ErrorType.ASYNC_QUERY_ERROR, _H400),
