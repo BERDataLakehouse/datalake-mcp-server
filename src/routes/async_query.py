@@ -33,6 +33,7 @@ from src.service.exceptions import (
     JobAccessDeniedError,
     JobNotFoundError,
     JobNotReadyError,
+    MissingTokenError,
     TooManyJobsError,
 )
 from src.service.models import (
@@ -58,6 +59,18 @@ router = APIRouter(
 def _get_executor(request: Request) -> AsyncQueryExecutor:
     """Retrieve the AsyncQueryExecutor from app state."""
     return request.app.state.async_query_executor
+
+
+def _require_auth_token(request: Request) -> str:
+    """Extract and validate the auth token from the request.
+
+    Raises MissingTokenError if the token cannot be parsed, ensuring
+    a clean 401 instead of a 500 from downstream credential fetch.
+    """
+    token = get_token_from_request(request)
+    if not token:
+        raise MissingTokenError("Authorization token required for this operation")
+    return token
 
 
 def _validate_job_access(job: JobRecord, username: str) -> None:
@@ -164,7 +177,7 @@ async def get_async_query_status(
 ) -> AsyncQueryStatusResponse:
     """Get the status of an async query job."""
     username = get_user_from_request(http_request)
-    auth_token = get_token_from_request(http_request)
+    auth_token = _require_auth_token(http_request)
     settings = get_settings()
     minio_access_key, minio_secret_key = fetch_user_minio_credentials(
         settings.GOVERNANCE_API_URL, auth_token
@@ -220,7 +233,7 @@ async def get_async_query_results(
 ) -> TableQueryResponse:
     """Get async query results (same format as sync query endpoint)."""
     username = get_user_from_request(http_request)
-    auth_token = get_token_from_request(http_request)
+    auth_token = _require_auth_token(http_request)
     settings = get_settings()
     minio_access_key, minio_secret_key = fetch_user_minio_credentials(
         settings.GOVERNANCE_API_URL, auth_token
@@ -289,7 +302,7 @@ async def list_async_query_jobs(
 ) -> list[AsyncQueryStatusResponse]:
     """List all async query jobs for the current user."""
     username = get_user_from_request(http_request)
-    auth_token = get_token_from_request(http_request)
+    auth_token = _require_auth_token(http_request)
     settings = get_settings()
     minio_access_key, minio_secret_key = fetch_user_minio_credentials(
         settings.GOVERNANCE_API_URL, auth_token

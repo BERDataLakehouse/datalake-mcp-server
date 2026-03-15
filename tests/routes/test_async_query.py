@@ -155,6 +155,14 @@ def _patch_get_user(username="testuser"):
     )
 
 
+def _patch_require_token(token="fake-token"):
+    """Patch _require_auth_token to return a fake token."""
+    return patch(
+        "src.routes.async_query._require_auth_token",
+        return_value=token,
+    )
+
+
 # =============================================================================
 # POST /submit Tests
 # =============================================================================
@@ -281,7 +289,7 @@ class TestGetAsyncQueryStatus:
         mock_job_store.get_job.return_value = sample_succeeded_job
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-succeed-1/status")
 
         assert response.status_code == 200
@@ -311,7 +319,7 @@ class TestGetAsyncQueryStatus:
         mock_s3.create_s3_client.return_value = MagicMock()
         mock_job_store.get_job.return_value = None
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/nonexistent/status")
 
         assert response.status_code == 404
@@ -346,7 +354,7 @@ class TestGetAsyncQueryStatus:
         )
         mock_job_store.get_job.return_value = other_user_job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/other-job/status")
 
         assert response.status_code == 403
@@ -387,7 +395,7 @@ class TestGetAsyncQueryResults:
         mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
         mock_s3.download_result.return_value = [{"id": 1}, {"id": 2}]
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-succeed-1/results")
 
         assert response.status_code == 200
@@ -421,7 +429,7 @@ class TestGetAsyncQueryResults:
         mock_job_store.get_job.return_value = sample_pending_job
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-pending-1/results")
 
         assert response.status_code == 409
@@ -447,7 +455,7 @@ class TestGetAsyncQueryResults:
         mock_s3.create_s3_client.return_value = MagicMock()
         mock_job_store.get_job.return_value = None
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/nonexistent/results")
 
         assert response.status_code == 404
@@ -483,7 +491,7 @@ class TestGetAsyncQueryResults:
         )
         mock_job_store.get_job.return_value = other_user_job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/other-job/results")
 
         assert response.status_code == 403
@@ -531,7 +539,7 @@ class TestListAsyncQueryJobs:
         mock_job_store.list_user_jobs.return_value = jobs
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/jobs")
 
         assert response.status_code == 200
@@ -560,7 +568,7 @@ class TestListAsyncQueryJobs:
         mock_job_store.list_user_jobs.return_value = []
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/jobs")
 
         assert response.status_code == 200

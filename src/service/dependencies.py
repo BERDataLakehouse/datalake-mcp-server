@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import grpc
 import httpx
 from fastapi import Depends, Request
+from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import AnyUrl
 from pyspark.sql import SparkSession
 
@@ -186,16 +187,22 @@ def get_token_from_request(request: Request) -> str | None:
     """
     Extract the Bearer token from the request Authorization header.
 
+    Uses the same parser as the auth middleware (get_authorization_scheme_param)
+    to handle case-insensitive schemes and extra whitespace consistently.
+
     Args:
         request: FastAPI request object
 
     Returns:
-        Token string (without 'Bearer ' prefix) or None if not present
+        Token string or None if not present or not a Bearer scheme
     """
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]  # Remove "Bearer " prefix
-    return None
+    if not auth_header:
+        return None
+    scheme, credentials = get_authorization_scheme_param(auth_header)
+    if scheme.lower() != "bearer" or not credentials:
+        return None
+    return credentials
 
 
 def construct_user_spark_connect_url(username: str) -> str:

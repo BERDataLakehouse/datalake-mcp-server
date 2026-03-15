@@ -842,26 +842,32 @@ class TestConcurrentSparkSessions:
             return spark_id
 
         # Apply patches GLOBALLY
-        with patch(
-            "src.service.dependencies.get_user_from_request",
-            side_effect=get_user_side_effect,
-        ):
-            with patch(
+        with (
+            patch(
+                "src.service.dependencies.get_user_from_request",
+                side_effect=get_user_side_effect,
+            ),
+            patch(
+                "src.service.dependencies.get_token_from_request",
+                return_value="fake-token",
+            ),
+            patch(
                 "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
-            ):
-                with patch(
-                    "src.service.dependencies.is_spark_connect_reachable",
-                    return_value=True,
-                ):
-                    with patch(
-                        "src.service.dependencies._get_spark_session",
-                        side_effect=get_spark_side_effect,
-                    ):
-                        args_list = [(i,) for i in range(5)]
-                        results, exceptions = concurrent_executor(
-                            create_session, args_list, max_workers=5
-                        )
+            ),
+            patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ),
+            patch(
+                "src.service.dependencies._get_spark_session",
+                side_effect=get_spark_side_effect,
+            ),
+        ):
+            args_list = [(i,) for i in range(5)]
+            results, exceptions = concurrent_executor(
+                create_session, args_list, max_workers=5
+            )
 
         assert len(exceptions) == 0, f"Encountered exceptions: {exceptions}"
         # Each user should get their own session corresponding to their ID
@@ -1032,27 +1038,33 @@ class TestConcurrentSparkSessions:
             return mode_index
 
         # Apply patches OUTSIDE the threads so all threads share the same mocks
-        with patch(
-            "src.service.dependencies.get_user_from_request",
-            side_effect=get_user_mock,
-        ):
-            with patch(
+        with (
+            patch(
+                "src.service.dependencies.get_user_from_request",
+                side_effect=get_user_mock,
+            ),
+            patch(
+                "src.service.dependencies.get_token_from_request",
+                return_value="fake-token",
+            ),
+            patch(
                 "src.service.dependencies.fetch_user_minio_credentials",
                 return_value=("access", "secret"),
-            ):
-                with patch(
-                    "src.service.dependencies.is_spark_connect_reachable",
-                    side_effect=is_connect_mock,
-                ):
-                    with patch(
-                        "src.service.dependencies._get_spark_session",
-                        side_effect=mock_create,
-                    ):
-                        # Run 4 requests: 2 Connect, 2 Standalone (interleaved)
-                        args_list = [(i,) for i in range(4)]
-                        results, exceptions = concurrent_executor(
-                            create_session, args_list, max_workers=4
-                        )
+            ),
+            patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                side_effect=is_connect_mock,
+            ),
+            patch(
+                "src.service.dependencies._get_spark_session",
+                side_effect=mock_create,
+            ),
+        ):
+            # Run 4 requests: 2 Connect, 2 Standalone (interleaved)
+            args_list = [(i,) for i in range(4)]
+            results, exceptions = concurrent_executor(
+                create_session, args_list, max_workers=4
+            )
 
         # No exceptions should occur
         assert len(exceptions) == 0, f"Got exceptions: {exceptions}"
@@ -1112,6 +1124,46 @@ class TestGetTokenFromRequest:
 
         request = MagicMock()
         request.headers.get.return_value = "Basic dXNlcjpwYXNz"
+
+        token = get_token_from_request(request)
+
+        assert token is None
+
+    def test_case_insensitive_scheme(self):
+        """Test that lowercase 'bearer' is accepted (matches auth middleware)."""
+
+        request = MagicMock()
+        request.headers.get.return_value = "bearer test-token-123"
+
+        token = get_token_from_request(request)
+
+        assert token == "test-token-123"
+
+    def test_uppercase_scheme(self):
+        """Test that uppercase 'BEARER' is accepted."""
+
+        request = MagicMock()
+        request.headers.get.return_value = "BEARER test-token-123"
+
+        token = get_token_from_request(request)
+
+        assert token == "test-token-123"
+
+    def test_extra_whitespace_trimmed(self):
+        """Test that extra whitespace between scheme and token is handled."""
+
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer   test-token-123"
+
+        token = get_token_from_request(request)
+
+        assert token == "test-token-123"
+
+    def test_returns_none_for_bearer_without_token(self):
+        """Test that 'Bearer' with no token value returns None."""
+
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer "
 
         token = get_token_from_request(request)
 
