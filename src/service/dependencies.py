@@ -2,7 +2,6 @@
 Dependencies for FastAPI dependency injection.
 """
 
-import json
 import logging
 import os
 import random
@@ -10,12 +9,13 @@ import re
 import socket
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated, Generator
 from urllib.parse import urlparse
 
 import grpc
+import httpx
 from fastapi import Depends, Request
+from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import AnyUrl
 from pyspark.sql import SparkSession
 
@@ -118,55 +118,46 @@ SPARK_CONNECT_PORT = "15002"
 # =============================================================================
 
 
-def read_user_minio_credentials(username: str) -> tuple[str, str]:
+def fetch_user_minio_credentials(
+    governance_api_url: str, auth_token: str
+) -> tuple[str, str]:
     """
-    Read user's MinIO credentials from their home directory.
+    Fetch user's MinIO credentials from the Governance API.
 
-    Each user has a .berdl_minio_credentials file in their home directory with format:
-    {"username": "user", "access_key": "key", "secret_key": "secret"}
+    Calls GET /credentials/ on the governance API with the user's Bearer token.
+    The API returns cached credentials (idempotent) or creates them on first call.
 
     Args:
-        username: KBase username
+        governance_api_url: Base URL of the governance API (e.g. "http://minio-service:8000")
+        auth_token: KBase auth token for the user
 
     Returns:
         Tuple of (access_key, secret_key)
 
     Raises:
-        FileNotFoundError: If credentials file doesn't exist
-        ValueError: If credentials file is malformed
+        Exception: If the API call fails or returns invalid data
     """
-    # Construct path to credentials file
-    creds_path = Path(f"/home/{username}/.berdl_minio_credentials")
+    url = f"{str(governance_api_url).rstrip('/')}/credentials/"
+    logger.debug(f"Fetching MinIO credentials from governance API: {url}")
 
-    logger.debug(f"Reading MinIO credentials from: {creds_path}")
+    response = httpx.get(
+        url, headers={"Authorization": f"Bearer {auth_token}"}, timeout=10.0
+    )
+    response.raise_for_status()
 
-    if not creds_path.exists():
-        raise FileNotFoundError(
-            f"MinIO credentials file not found at {creds_path}. "
-            f"User {username} must have .berdl_minio_credentials in their home directory."
+    data = response.json()
+    access_key = data.get("access_key")
+    secret_key = data.get("secret_key")
+
+    if not access_key or not secret_key:
+        raise ValueError(
+            "Invalid credentials response from governance API: missing access_key or secret_key"
         )
 
-    try:
-        with open(creds_path, "r") as f:
-            creds = json.load(f)
-
-        access_key = creds.get("access_key")
-        secret_key = creds.get("secret_key")
-
-        if not access_key or not secret_key:
-            raise ValueError(
-                f"Invalid credentials format in {creds_path}. "
-                f'Expected: {{"username": "user", "access_key": "key", "secret_key": "secret"}}'
-            )
-
-        logger.info(f"Successfully loaded MinIO credentials for user: {username}")
-        return access_key, secret_key
-
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse MinIO credentials file {creds_path}: {e}")
-    except Exception as e:
-        logger.error(f"Error reading MinIO credentials for {username}: {e}")
-        raise
+    logger.info(
+        f"Successfully fetched MinIO credentials for user: {data.get('username')}"
+    )
+    return access_key, secret_key
 
 
 def get_user_from_request(request: Request) -> str:
@@ -196,16 +187,22 @@ def get_token_from_request(request: Request) -> str | None:
     """
     Extract the Bearer token from the request Authorization header.
 
+    Uses the same parser as the auth middleware (get_authorization_scheme_param)
+    to handle case-insensitive schemes and extra whitespace consistently.
+
     Args:
         request: FastAPI request object
 
     Returns:
-        Token string (without 'Bearer ' prefix) or None if not present
+        Token string or None if not present or not a Bearer scheme
     """
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]  # Remove "Bearer " prefix
-    return None
+    if not auth_header:
+        return None
+    scheme, credentials = get_authorization_scheme_param(auth_header)
+    if scheme.lower() != "bearer" or not credentials:
+        return None
+    return credentials
 
 
 def construct_user_spark_connect_url(username: str) -> str:
@@ -398,23 +395,24 @@ def get_spark_context(
 
     logger.info(f"Creating Spark context for user: {username}")
 
-    # Read user's MinIO credentials from their home directory
-    try:
-        minio_access_key, minio_secret_key = read_user_minio_credentials(username)
-        logger.debug(f"Loaded MinIO credentials for user {username}")
-    except FileNotFoundError as e:
-        logger.error(f"MinIO credentials file not found for {username}: {e}")
+    # Fetch user's MinIO credentials from the governance API
+    if not auth_token:
         raise Exception(
-            f"Cannot create Spark context: MinIO credentials file not found for user {username}. "
-            f"Ensure .berdl_minio_credentials exists in user's home directory at /home/{username}/.berdl_minio_credentials"
+            f"Cannot create Spark context: no auth token available for user {username}"
         )
+    try:
+        minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+            settings.GOVERNANCE_API_URL, auth_token
+        )
+        logger.debug(f"Fetched MinIO credentials for user {username}")
     except Exception as e:
         logger.error(
-            f"Failed to load MinIO credentials for {username}: {type(e).__name__}: {e}",
+            f"Failed to fetch MinIO credentials for {username}: {type(e).__name__}: {e}",
             exc_info=True,
         )
         raise Exception(
-            f"Cannot create Spark context: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+            f"Cannot create Spark context: failed to fetch MinIO credentials for user {username}: "
+            f"{type(e).__name__}: {e}"
         )
 
     # Build base user-specific settings as picklable dict
@@ -629,19 +627,22 @@ def get_spark_session(
         SparkSession configured for the user
     """
     username = get_user_from_request(request)
+    auth_token = get_token_from_request(request)
     logger.info(f"Creating Spark session for user: {username}")
 
-    # Read user's MinIO credentials
-    try:
-        minio_access_key, minio_secret_key = read_user_minio_credentials(username)
-    except FileNotFoundError:
+    # Fetch user's MinIO credentials from the governance API
+    if not auth_token:
         raise Exception(
-            f"Cannot create Spark session: MinIO credentials file not found for user {username}. "
-            f"Ensure .berdl_minio_credentials exists at /home/{username}/.berdl_minio_credentials"
+            f"Cannot create Spark session: no auth token available for user {username}"
+        )
+    try:
+        minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+            settings.GOVERNANCE_API_URL, auth_token
         )
     except Exception as e:
         raise Exception(
-            f"Cannot create Spark session: Error reading MinIO credentials for user {username}: {type(e).__name__}: {e}"
+            f"Cannot create Spark session: failed to fetch MinIO credentials for user {username}: "
+            f"{type(e).__name__}: {e}"
         )
 
     base_user_settings = {
