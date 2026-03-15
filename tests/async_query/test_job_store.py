@@ -24,6 +24,7 @@ from src.async_query.job_store import (
     _deserialize_job,
     _metadata_key,
     _serialize_job,
+    cleanup_stale_jobs,
     create_job,
     count_active_user_jobs,
     expire_stale_job,
@@ -85,9 +86,14 @@ def mock_s3():
     paginator.paginate = MagicMock(side_effect=paginate)
     client.get_paginator = MagicMock(return_value=paginator)
 
+    def delete_objects(Bucket, Delete, **kwargs):
+        for obj in Delete.get("Objects", []):
+            objects.pop(obj["Key"], None)
+
     client.put_object = MagicMock(side_effect=put_object)
     client.get_object = MagicMock(side_effect=get_object)
     client.list_objects_v2 = MagicMock(side_effect=list_objects_v2)
+    client.delete_objects = MagicMock(side_effect=delete_objects)
     client._objects = objects
 
     return client
@@ -675,3 +681,191 @@ class TestExpireStaleJob:
 
         result = expire_stale_job(mock_s3, job)
         assert result.status == JobStatus.RUNNING
+
+
+# =============================================================================
+# Cleanup Stale Jobs Tests
+# =============================================================================
+
+
+class TestCleanupStaleJobs:
+    """Tests for the cleanup_stale_jobs function."""
+
+    def _store_job(self, mock_s3, job: JobRecord):
+        """Helper: serialize a job into the mock S3 store with associated files."""
+        prefix = f"users-general-warehouse/{job.user}/data/query_result/{job.job_id}/"
+        key = f"{prefix}_metadata.json"
+        mock_s3._objects[key] = _serialize_job(job).encode()
+        # Simulate result and .s3keep files
+        mock_s3._objects[f"{prefix}result.json"] = b'[{"id": 1}]'
+        mock_s3._objects[f"{prefix}.s3keep"] = b""
+
+    def test_no_jobs_returns_zero(self, mock_s3):
+        """No jobs means nothing to clean up."""
+        assert cleanup_stale_jobs(mock_s3, "testuser") == 0
+
+    def test_skips_recent_pending_job(self, mock_s3):
+        """Recent PENDING job is not cleaned up."""
+        job = JobRecord(
+            job_id="recent-pending",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.PENDING,
+            limit=100,
+            offset=0,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+        )
+        self._store_job(mock_s3, job)
+
+        assert cleanup_stale_jobs(mock_s3, "testuser") == 0
+        # Files should still exist
+        assert any("recent-pending" in k for k in mock_s3._objects)
+
+    def test_skips_succeeded_job(self, mock_s3):
+        """SUCCEEDED jobs are never cleaned up regardless of age."""
+        job = JobRecord(
+            job_id="old-success",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.SUCCEEDED,
+            limit=100,
+            offset=0,
+            created_at=datetime.now(timezone.utc)
+            - timedelta(seconds=_STALE_JOB_TIMEOUT + 300),
+        )
+        self._store_job(mock_s3, job)
+
+        assert cleanup_stale_jobs(mock_s3, "testuser") == 0
+
+    def test_cleans_stale_pending_job(self, mock_s3):
+        """Stale PENDING job has its entire directory deleted."""
+        stale_time = datetime.now(timezone.utc) - timedelta(
+            seconds=_STALE_JOB_TIMEOUT + 60
+        )
+        job = JobRecord(
+            job_id="stale-pending",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.PENDING,
+            limit=100,
+            offset=0,
+            created_at=stale_time,
+        )
+        self._store_job(mock_s3, job)
+
+        result = cleanup_stale_jobs(mock_s3, "testuser")
+
+        assert result == 1
+        # All files under the job prefix should be deleted
+        assert not any("stale-pending" in k for k in mock_s3._objects)
+
+    def test_cleans_stale_running_job(self, mock_s3):
+        """Stale RUNNING job has its entire directory deleted."""
+        stale_time = datetime.now(timezone.utc) - timedelta(
+            seconds=_STALE_JOB_TIMEOUT + 60
+        )
+        job = JobRecord(
+            job_id="stale-running",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.RUNNING,
+            limit=100,
+            offset=0,
+            created_at=stale_time - timedelta(seconds=5),
+            started_at=stale_time,
+        )
+        self._store_job(mock_s3, job)
+
+        result = cleanup_stale_jobs(mock_s3, "testuser")
+
+        assert result == 1
+        assert not any("stale-running" in k for k in mock_s3._objects)
+
+    def test_cleans_multiple_stale_jobs(self, mock_s3):
+        """Multiple stale jobs are all cleaned up in one pass."""
+        stale_time = datetime.now(timezone.utc) - timedelta(
+            seconds=_STALE_JOB_TIMEOUT + 60
+        )
+        for i in range(3):
+            job = JobRecord(
+                job_id=f"stale-{i}",
+                user="testuser",
+                query="SELECT 1",
+                status=JobStatus.PENDING,
+                limit=100,
+                offset=0,
+                created_at=stale_time,
+            )
+            self._store_job(mock_s3, job)
+
+        result = cleanup_stale_jobs(mock_s3, "testuser")
+
+        assert result == 3
+        remaining = [k for k in mock_s3._objects if "query_result" in k]
+        assert len(remaining) == 0
+
+    def test_mixed_stale_and_active(self, mock_s3):
+        """Only stale jobs are cleaned up; active ones are left alone."""
+        stale_time = datetime.now(timezone.utc) - timedelta(
+            seconds=_STALE_JOB_TIMEOUT + 60
+        )
+        stale_job = JobRecord(
+            job_id="stale-job",
+            user="testuser",
+            query="SELECT 1",
+            status=JobStatus.PENDING,
+            limit=100,
+            offset=0,
+            created_at=stale_time,
+        )
+        active_job = JobRecord(
+            job_id="active-job",
+            user="testuser",
+            query="SELECT 2",
+            status=JobStatus.RUNNING,
+            limit=100,
+            offset=0,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+            started_at=datetime.now(timezone.utc) - timedelta(seconds=25),
+        )
+        self._store_job(mock_s3, stale_job)
+        self._store_job(mock_s3, active_job)
+
+        result = cleanup_stale_jobs(mock_s3, "testuser")
+
+        assert result == 1
+        assert not any("stale-job" in k for k in mock_s3._objects)
+        assert any("active-job" in k for k in mock_s3._objects)
+
+    def test_only_cleans_target_user(self, mock_s3):
+        """Cleanup only affects the specified user's jobs."""
+        stale_time = datetime.now(timezone.utc) - timedelta(
+            seconds=_STALE_JOB_TIMEOUT + 60
+        )
+        user_a_job = JobRecord(
+            job_id="user-a-stale",
+            user="user_a",
+            query="SELECT 1",
+            status=JobStatus.PENDING,
+            limit=100,
+            offset=0,
+            created_at=stale_time,
+        )
+        user_b_job = JobRecord(
+            job_id="user-b-stale",
+            user="user_b",
+            query="SELECT 1",
+            status=JobStatus.PENDING,
+            limit=100,
+            offset=0,
+            created_at=stale_time,
+        )
+        self._store_job(mock_s3, user_a_job)
+        self._store_job(mock_s3, user_b_job)
+
+        result = cleanup_stale_jobs(mock_s3, "user_a")
+
+        assert result == 1
+        assert not any("user-a-stale" in k for k in mock_s3._objects)
+        # user_b's files should be untouched
+        assert any("user-b-stale" in k for k in mock_s3._objects)

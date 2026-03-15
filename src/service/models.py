@@ -10,7 +10,9 @@ from typing import Annotated, Any, Dict, List, Literal
 from pydantic import BaseModel, Field
 
 MAX_ASYNC_QUERY_ROWS = int(os.getenv("ASYNC_QUERY_MAX_ROWS", "5000"))
-MAX_CONCURRENT_ASYNC_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_ASYNC_JOBS", "10"))
+MAX_CONCURRENT_ASYNC_JOBS_PER_USER = int(
+    os.getenv("MAX_CONCURRENT_ASYNC_JOBS_PER_USER", "10")
+)
 
 
 class ErrorResponse(BaseModel):
