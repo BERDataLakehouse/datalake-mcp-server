@@ -155,6 +155,14 @@ def _patch_get_user(username="testuser"):
     )
 
 
+def _patch_require_token(token="fake-token"):
+    """Patch _require_auth_token to return a fake token."""
+    return patch(
+        "src.routes.async_query._require_auth_token",
+        return_value=token,
+    )
+
+
 # =============================================================================
 # POST /submit Tests
 # =============================================================================
@@ -260,7 +268,7 @@ class TestGetAsyncQueryStatus:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_returns_job(
         self,
@@ -281,7 +289,7 @@ class TestGetAsyncQueryStatus:
         mock_job_store.get_job.return_value = sample_succeeded_job
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-succeed-1/status")
 
         assert response.status_code == 200
@@ -292,7 +300,7 @@ class TestGetAsyncQueryStatus:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_not_found(
         self,
@@ -311,14 +319,14 @@ class TestGetAsyncQueryStatus:
         mock_s3.create_s3_client.return_value = MagicMock()
         mock_job_store.get_job.return_value = None
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/nonexistent/status")
 
         assert response.status_code == 404
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_status_access_denied(
         self,
@@ -346,7 +354,7 @@ class TestGetAsyncQueryStatus:
         )
         mock_job_store.get_job.return_value = other_user_job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/other-job/status")
 
         assert response.status_code == 403
@@ -361,7 +369,7 @@ class TestGetAsyncQueryResults:
     """Tests for the results endpoint."""
 
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.job_store")
     def test_results_returns_inline_data(
@@ -387,7 +395,7 @@ class TestGetAsyncQueryResults:
         mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
         mock_s3.download_result.return_value = [{"id": 1}, {"id": 2}]
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-succeed-1/results")
 
         assert response.status_code == 200
@@ -400,7 +408,7 @@ class TestGetAsyncQueryResults:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_not_ready(
         self,
@@ -421,14 +429,14 @@ class TestGetAsyncQueryResults:
         mock_job_store.get_job.return_value = sample_pending_job
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/job-pending-1/results")
 
         assert response.status_code == 409
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_not_found(
         self,
@@ -447,14 +455,14 @@ class TestGetAsyncQueryResults:
         mock_s3.create_s3_client.return_value = MagicMock()
         mock_job_store.get_job.return_value = None
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/nonexistent/results")
 
         assert response.status_code == 404
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_results_access_denied(
         self,
@@ -483,7 +491,7 @@ class TestGetAsyncQueryResults:
         )
         mock_job_store.get_job.return_value = other_user_job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/other-job/results")
 
         assert response.status_code == 403
@@ -499,7 +507,7 @@ class TestListAsyncQueryJobs:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_list_jobs_returns_user_jobs(
         self,
@@ -531,7 +539,7 @@ class TestListAsyncQueryJobs:
         mock_job_store.list_user_jobs.return_value = jobs
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/jobs")
 
         assert response.status_code == 200
@@ -540,7 +548,7 @@ class TestListAsyncQueryJobs:
 
     @patch("src.routes.async_query.s3_client")
     @patch("src.routes.async_query.get_settings")
-    @patch("src.routes.async_query.read_user_minio_credentials")
+    @patch("src.routes.async_query.fetch_user_minio_credentials")
     @patch("src.routes.async_query.job_store")
     def test_list_jobs_empty(
         self,
@@ -560,7 +568,7 @@ class TestListAsyncQueryJobs:
         mock_job_store.list_user_jobs.return_value = []
         mock_job_store.expire_stale_job.side_effect = lambda client, job: job
 
-        with _patch_get_user("testuser"):
+        with _patch_get_user("testuser"), _patch_require_token():
             response = client.get("/delta/tables/query/async/jobs")
 
         assert response.status_code == 200
