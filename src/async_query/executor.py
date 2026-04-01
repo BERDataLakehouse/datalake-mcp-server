@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 
 from src.async_query import job_store, s3_client
 from src.service.dependencies import SparkContext
-from src.service.models import MAX_ASYNC_QUERY_ROWS, JobStatus
-from src.service.query_executor import execute_query
+from src.service.models import MAX_ASYNC_QUERY_ROWS, JobStatus, QueryEngine
+from src.service.query_executor import execute_query, execute_query_trino
+from src.trino_engine.trino_connection import create_trino_connection
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ class AsyncQueryExecutor:
         minio_access_key: str,
         minio_secret_key: str,
         minio_secure: bool,
+        engine: QueryEngine = QueryEngine.SPARK,
+        auth_token: str | None = None,
+        trino_settings: dict | None = None,
     ) -> None:
         """
         Submit a query for background execution.
@@ -67,6 +71,10 @@ class AsyncQueryExecutor:
             minio_access_key: MinIO access key for the user.
             minio_secret_key: MinIO secret key for the user.
             minio_secure: Whether to use HTTPS for MinIO.
+            engine: Query engine to use (spark or trino).
+            auth_token: KBase auth token (required for Trino connections).
+            trino_settings: Trino-specific settings (TRINO_HOST, TRINO_PORT,
+                BERDL_HIVE_METASTORE_URI). Required when engine is TRINO.
         """
         task = asyncio.create_task(
             self._execute_query(
@@ -80,12 +88,14 @@ class AsyncQueryExecutor:
                 minio_access_key,
                 minio_secret_key,
                 minio_secure,
+                engine,
+                auth_token,
+                trino_settings,
             )
         )
         self._active_tasks[job_id] = task
         logger.info(
-            f"Submitted async query: job_id={job_id} user={user} "
-            f"mode={'standalone' if ctx.is_standalone_subprocess else 'connect'}"
+            f"Submitted async query: job_id={job_id} user={user} engine={engine.value}"
         )
 
     async def _execute_query(
@@ -100,6 +110,9 @@ class AsyncQueryExecutor:
         minio_access_key: str,
         minio_secret_key: str,
         minio_secure: bool,
+        engine: QueryEngine = QueryEngine.SPARK,
+        auth_token: str | None = None,
+        trino_settings: dict | None = None,
     ) -> None:
         """Background coroutine that orchestrates query execution."""
         bucket = s3_client.ASYNC_QUERY_RESULT_BUCKET
@@ -128,16 +141,30 @@ class AsyncQueryExecutor:
                 s3_client.create_s3keep, client, bucket, root_prefix
             )
 
-            # 3. Execute query — same function and timeouts as the sync path
-            response = await asyncio.to_thread(
-                execute_query,
-                ctx,
-                query,
-                limit,
-                offset,
-                user,
-                max_rows=MAX_ASYNC_QUERY_ROWS,
-            )
+            # 3. Execute query using the selected engine
+            if engine == QueryEngine.TRINO:
+                response = await self._execute_trino_query(
+                    user=user,
+                    query=query,
+                    limit=limit,
+                    offset=offset,
+                    auth_token=auth_token,
+                    minio_access_key=minio_access_key,
+                    minio_secret_key=minio_secret_key,
+                    minio_endpoint=minio_endpoint,
+                    minio_secure=minio_secure,
+                    trino_settings=trino_settings,
+                )
+            else:
+                response = await asyncio.to_thread(
+                    execute_query,
+                    ctx,
+                    query,
+                    limit,
+                    offset,
+                    user,
+                    max_rows=MAX_ASYNC_QUERY_ROWS,
+                )
 
             # 4. Write result to S3 via boto3
             result_json = json.dumps(response.result)
@@ -180,6 +207,50 @@ class AsyncQueryExecutor:
 
         finally:
             self._active_tasks.pop(job_id, None)
+
+    async def _execute_trino_query(
+        self,
+        user: str,
+        query: str,
+        limit: int,
+        offset: int,
+        auth_token: str | None,
+        minio_access_key: str,
+        minio_secret_key: str,
+        minio_endpoint: str,
+        minio_secure: bool,
+        trino_settings: dict | None,
+    ):
+        """Create a fresh Trino connection and execute the query."""
+        if not trino_settings:
+            raise ValueError("trino_settings required for Trino engine")
+        if not auth_token:
+            raise ValueError("auth_token required for Trino engine")
+
+        conn = await asyncio.to_thread(
+            create_trino_connection,
+            username=user,
+            auth_token=auth_token,
+            access_key=minio_access_key,
+            secret_key=minio_secret_key,
+            trino_host=trino_settings["TRINO_HOST"],
+            trino_port=trino_settings["TRINO_PORT"],
+            hive_metastore_uri=trino_settings["BERDL_HIVE_METASTORE_URI"],
+            minio_endpoint_url=minio_endpoint,
+            minio_secure=minio_secure,
+        )
+        try:
+            return await asyncio.to_thread(
+                execute_query_trino,
+                conn,
+                query,
+                limit,
+                offset,
+                user,
+                max_rows=MAX_ASYNC_QUERY_ROWS,
+            )
+        finally:
+            conn.close()
 
     async def shutdown(self) -> None:
         """

@@ -17,6 +17,7 @@ dependencies = [
     "boto3>=1.40.70",
     "httpx>=0.28.0",
     "berdl_notebook_utils",
+    "trino>=0.330.0",
 ]
 
 [tool.uv.sources]

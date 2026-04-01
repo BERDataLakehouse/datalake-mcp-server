@@ -23,12 +23,16 @@
 #
 #    git clone https://github.com/BERDataLakehouse/spark_notebook_base.git
 #    git clone https://github.com/BERDataLakehouse/kube_spark_manager_image.git
+#    git clone https://github.com/BERDataLakehouse/minio_manager_service.git
+#    git clone https://github.com/BERDataLakehouse/trino_access_control.git
 #
 #    Your directory structure should look like:
 #    parent/
 #      ├── datalake-mcp-server/      (this directory)
 #      ├── spark_notebook_base/
-#      └── kube_spark_manager_image/
+#      ├── kube_spark_manager_image/
+#      ├── minio_manager_service/
+#      └── trino_access_control/
 #
 # 2. BUILD REQUIRED BASE IMAGES FIRST:
 #    cd ../spark_notebook_base && \
@@ -43,10 +47,12 @@
 #
 #    NOTE: Base images must be rebuilt when Dockerfiles or dependencies change.
 #
-# AUTHENTICATION SETUP (REQUIRED FOR BOTH OPTIONS):
-# --------------------------------------------------
-# - Update KBASE_AUTH_TOKEN with your KBase CI auth token
-# - Update NB_USER with your KBase CI username
+# ENVIRONMENT SETUP (REQUIRED FOR BOTH OPTIONS):
+# ------------------------------------------------
+# 1. Copy .env.example to .env and set your KBase usernames:
+#      cp .env.example .env
+# 2. The .env file defines CONNECT_USER and STANDALONE_USER for the two
+#    test user personas (Spark Connect vs Standalone fallback).
 #
 # DEFAULT CREDENTIALS:
 # --------------------
@@ -57,8 +63,10 @@
 # -------------------
 # This stack includes:
 # - Spark standalone cluster (master + 2 workers)
+# - Trino query engine (coordinator + worker)
 # - MinIO S3-compatible storage
-# - PostgreSQL (Hive Metastore backend)
+# - MinIO Manager Service (credential/governance API)
+# - PostgreSQL (Hive Metastore + MMS backend)
 # - Redis (distributed caching)
 # - Datalake MCP Server (main service under test)
 
@@ -75,8 +83,14 @@ services:
     ports:
       - "8000:8000"  # MCP server API
     environment:
-      # SPARK CONFIGURATION
-      - SPARK_CONNECT_URL_TEMPLATE=sc://spark-master:15002
+      # =========================================================================
+      # MIXED MODE CONFIGURATION
+      # =========================================================================
+      # CONNECT_USER:    sc://spark-notebook-{CONNECT_USER}:15002 → running → Spark Connect
+      # STANDALONE_USER: sc://spark-notebook-{STANDALONE_USER}:15002 → NOT running → Standalone fallback
+      # =========================================================================
+      - SPARK_CONNECT_URL_TEMPLATE=sc://spark-notebook-{username}:15002
+      - SHARED_SPARK_MASTER_URL=spark://standalone-spark-master:7077
       - SPARK_MASTER_URL=spark://spark-master:7077
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
 
@@ -87,12 +101,7 @@ services:
       - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
       - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
       - KBASE_REQUIRED_ROLES=BERDL_USER
-
-      # POSTGRESQL CONFIGURATION (read-only user)
-      - POSTGRES_URL=postgres:5432
-      - POSTGRES_DB=hive
-      - POSTGRES_USER=readonly_user
-      - POSTGRES_PASSWORD=readonly_password
+      - MFA_EXEMPT_USERS=${MFA_EXEMPT_USERS:-${CONNECT_USER},${STANDALONE_USER},kbaselakehouseserviceaccount}
 
       # REDIS CONFIGURATION
       - BERDL_REDIS_HOST=redis
@@ -100,17 +109,197 @@ services:
 
       # DATA LAKE CONFIGURATION
       - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/users-sql-warehouse
-    volumes:
-      # Mount the shared /home directory to access user credentials
-      # This allows the MCP server to dynamically read any user's MinIO credentials
-      # from /home/{username}/.berdl_minio_credentials
-      - users_home:/home:ro
+
+      # DATA GOVERNANCE CONFIGURATION
+      - GOVERNANCE_API_URL=http://minio-manager-service:8000
+
+      # TRINO CONFIGURATION
+      - TRINO_HOST=trino
+      - TRINO_PORT=8080
+      - QUERY_ENGINE=spark
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/apis/mcp/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     depends_on:
       - spark-master
+      - spark-connect-notebook
+      - standalone-spark-master
       - hive-metastore
       - minio
+      - minio-manager-service
       - postgres
       - redis
+      - trino
+
+  # =========================================================================
+  # SPARK CONNECT NOTEBOOK (dedicated cluster for CONNECT_USER)
+  # =========================================================================
+  # Provides dedicated Spark Connect server for the CONNECT_USER.
+  # Requests route to sc://spark-notebook-{CONNECT_USER}:15002 via network alias.
+  # =========================================================================
+  spark-connect-notebook:
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
+    ports:
+      - "15103:15002"  # Spark Connect server (host accessible for test data creation)
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=0.0.0.0
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      - USER=${CONNECT_USER}
+    # Start ONLY Spark Connect server (user's dedicated cluster)
+    # BERDL_ALLOWED_NAMESPACE_PREFIXES is computed from USER env var at startup,
+    # matching the production behavior in connect_server.py
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/scripts/check_env.sh &&
+        export BERDL_ALLOWED_NAMESPACE_PREFIXES="u_$${USER}__,globalusers_" &&
+        echo "Namespace prefixes for $${USER}: $$BERDL_ALLOWED_NAMESPACE_PREFIXES" &&
+        $$SPARK_HOME/sbin/start-connect-server.sh \
+          --master local[4] \
+          --conf spark.driver.host=spark-connect-notebook \
+          --conf spark.sql.warehouse.dir=s3a://cdm-lake/users-sql-warehouse/ \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio:9002 \
+          --conf spark.hadoop.fs.s3a.access.key=minio \
+          --conf spark.hadoop.fs.s3a.secret.key=minio123 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+          --conf hive.metastore.uris=thrift://hive-metastore:9083 \
+          --conf spark.sql.catalogImplementation=hive \
+          --conf spark.sql.hive.metastore.version=4.0.0 \
+          --conf spark.sql.hive.metastore.jars=path \
+          --conf spark.sql.hive.metastore.jars.path=/usr/local/spark/jars/* \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.sedona.sql.SedonaSqlExtensions \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.NamespaceValidationInterceptor &&
+        tail -f /dev/null
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/15002'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ./configs/hive-site.xml:/usr/local/spark/conf/hive-site.xml:ro
+    depends_on:
+      - hive-metastore
+      - minio
+      - redis
+    networks:
+      default:
+        aliases:
+          - spark-notebook-${CONNECT_USER}
+
+  # =========================================================================
+  # STANDALONE SPARK CLUSTER (shared cluster for STANDALONE_USER)
+  # =========================================================================
+  # This is a separate Spark cluster for standalone mode (no Spark Connect).
+  # When STANDALONE_USER's request fails to connect via Spark Connect, it falls back here.
+  # =========================================================================
+  standalone-spark-master:
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
+    ports:
+      - "8291:8080"  # Spark Master Web UI (standalone)
+      - "7079:7077"  # Spark Master port (standalone)
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=0.0.0.0
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/7077'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./configs/hive-site.xml:/usr/local/spark/conf/hive-site.xml:ro
+    depends_on:
+      - hive-metastore
+      - minio
+      - redis
+
+  standalone-spark-worker:
+    # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
+    # platform: linux/amd64
+    build:
+      context: ../kube_spark_manager_image
+      dockerfile: Dockerfile
+      args:
+        BASE_TAG: local
+        BASE_REGISTRY: ""
+    ports:
+      - "8293:8081"  # Spark Worker Web UI (standalone)
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://standalone-spark-master:7077
+      - SPARK_WORKER_CORES=4
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_PORT=8081
+      - SPARK_WORKER_WEBUI_PORT=8081
+      - BERDL_REDIS_HOST=redis
+      - BERDL_REDIS_PORT=6379
+      - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
+      - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'spark.deploy.worker' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      - standalone-spark-master
+
+  minio-manager-service:
+    # image: ghcr.io/berdatalakehouse/minio_manager_service:main
+    # platform: linux/amd64
+    build:
+      context: ../minio_manager_service
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8000"
+    environment:
+      - MINIO_ENDPOINT=http://minio:9002
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio123
+      - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
+      - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
+      - KBASE_APPROVED_ROLES=BERDL_USER
+      - REDIS_URL=redis://redis:6379
+      # Credential store (PostgreSQL)
+      - MMS_DB_HOST=postgres
+      - MMS_DB_PORT=5432
+      - MMS_DB_NAME=mms
+      - MMS_DB_USER=mms
+      - MMS_DB_PASSWORD=mmspassword
+      - MMS_DB_ENCRYPTION_KEY=change-me-in-prod
+    depends_on:
+      - minio
+      - redis
+      - postgres
 
   spark-master:
     # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
@@ -122,9 +311,9 @@ services:
         BASE_TAG: local
         BASE_REGISTRY: ""
     ports:
-      - "8090:8080"     # Spark Master Web UI
-      - "7077:7077"     # Spark Master
-      - "15002:15002"   # Spark Connect server
+      - "8190:8080"     # Spark Master Web UI (use 8190 to avoid conflicts)
+      - "7078:7077"     # Spark Master (use 7078 to avoid conflicts)
+      - "15102:15002"   # Spark Connect server (use 15102 to avoid conflicts)
     environment:
       - SPARK_MODE=master
       - SPARK_MASTER_HOST=0.0.0.0
@@ -134,6 +323,47 @@ services:
       - BERDL_REDIS_PORT=6379
       - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      - USER=${STANDALONE_USER}
+    # Override entrypoint to start both Spark Master AND Spark Connect server
+    # The default entrypoint only starts Spark Master, but MCP server needs Spark Connect
+    # BERDL_ALLOWED_NAMESPACE_PREFIXES is computed from USER env var at startup,
+    # matching the production behavior in connect_server.py
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/scripts/check_env.sh &&
+        export BERDL_ALLOWED_NAMESPACE_PREFIXES="u_$${USER}__,globalusers_" &&
+        echo "Namespace prefixes for $${USER}: $$BERDL_ALLOWED_NAMESPACE_PREFIXES" &&
+        $$SPARK_HOME/sbin/start-master.sh &&
+        sleep 10 &&
+        $$SPARK_HOME/sbin/start-connect-server.sh \
+          --master spark://localhost:7077 \
+          --conf spark.cores.max=20 \
+          --conf spark.sql.warehouse.dir=s3a://cdm-lake/users-sql-warehouse/ \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio:9002 \
+          --conf spark.hadoop.fs.s3a.access.key=minio \
+          --conf spark.hadoop.fs.s3a.secret.key=minio123 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+          --conf hive.metastore.uris=thrift://hive-metastore:9083 \
+          --conf spark.sql.catalogImplementation=hive \
+          --conf spark.sql.hive.metastore.version=4.0.0 \
+          --conf spark.sql.hive.metastore.jars=path \
+          --conf spark.sql.hive.metastore.jars.path=/usr/local/spark/jars/* \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.sedona.sql.SedonaSqlExtensions \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.NamespaceValidationInterceptor &&
+        tail -f /dev/null
+    volumes:
+      # Mount hive-site.xml for HMS client configuration
+      # This enables Spark Connect to use external HMS instead of embedded Derby
+      - ./configs/hive-site.xml:/usr/local/spark/conf/hive-site.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/15002'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     depends_on:
       - hive-metastore
       - minio
@@ -149,7 +379,7 @@ services:
         BASE_TAG: local
         BASE_REGISTRY: ""
     ports:
-      - "8081:8081"  # Spark Worker Web UI
+      - "8191:8081"  # Spark Worker Web UI (use 8191 to avoid conflicts)
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -161,6 +391,11 @@ services:
       - BERDL_REDIS_PORT=6379
       - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'spark.deploy.worker' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     depends_on:
       - spark-master
 
@@ -174,7 +409,7 @@ services:
         BASE_TAG: local
         BASE_REGISTRY: ""
     ports:
-      - "8082:8082"  # Spark Worker Web UI
+      - "8192:8082"  # Spark Worker Web UI (use 8192 to avoid conflicts)
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -186,6 +421,11 @@ services:
       - BERDL_REDIS_PORT=6379
       - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'spark.deploy.worker' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     depends_on:
       - spark-master
 
@@ -200,7 +440,7 @@ services:
         # Using newer Hive versions (4.1.0+) causes Thrift protocol incompatibilities
         HIVE_IMAGE_TAG: "4.0.0"
     ports:
-      - "9083:9083"  # Hive Metastore Thrift
+      - "9084:9083"  # Use 9084 on host to avoid conflicts with local Hive Metastore
     environment:
       # PostgreSQL database configuration
       - POSTGRES_DB=hive
@@ -216,32 +456,43 @@ services:
 
       # Delta Lake warehouse directory
       - DELTALAKE_WAREHOUSE_DIR=s3a://cdm-lake/users-sql-warehouse
+    volumes:
+      # Override default hive-site.xml template to enable S3 warehouse directory
+      - ./configs/hive-metastore-site.xml:/opt/hive/conf/hive-site.xml.template:ro
     depends_on:
       - postgres
       - minio
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "9083"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9083'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   postgres:
     image: postgres:16.3
     ports:
-      - "5432:5432"
+      - "5433:5432"  # Use 5433 on host to avoid conflicts with local PostgreSQL
     environment:
       - POSTGRES_USER=hive
       - POSTGRES_PASSWORD=hivepassword
       - POSTGRES_DB=hive
+      - READONLY_USER=readonly
+      - READONLY_PASSWORD=readonlypassword
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-postgres-readonly.sh:/docker-entrypoint-initdb.d/init-postgres-readonly.sh:ro
+      - ./scripts/init-postgres-readonly.sh:/docker-entrypoint-initdb.d/01-init-readonly.sh:ro
+      - ./scripts/init-mms-db.sh:/docker-entrypoint-initdb.d/02-init-mms-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive"]
+      interval: 5s
+      timeout: 2s
+      retries: 15
 
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z-cpuv1
     ports:
-      - "9002:9002"  # MinIO API
-      - "9003:9003"  # MinIO Console
+      - "9022:9002"  # MinIO API (use 9022 on host to avoid conflicts)
+      - "9023:9003"  # MinIO Console (use 9023 on host to avoid conflicts)
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: minio123
@@ -268,6 +519,13 @@ services:
       mc mb --ignore-existing local/cdm-lake;
       mc mb --ignore-existing local/cdm-spark-job-logs;
 
+      echo 'Creating warehouse directory...';
+      echo '' | mc pipe local/cdm-lake/users-sql-warehouse/.s3keep;
+
+      echo 'Creating spark job logs directories for test users...';
+      echo '' | mc pipe local/cdm-spark-job-logs/spark-job-logs/${CONNECT_USER}/.s3keep;
+      echo '' | mc pipe local/cdm-spark-job-logs/spark-job-logs/${STANDALONE_USER}/.s3keep;
+
       echo 'Creating service accounts...';
       mc admin user svcacct add --access-key minio-readonly --secret-key minio123 local minio || true;
       mc admin user svcacct add --access-key minio-readwrite --secret-key minio123 local minio || true;
@@ -279,13 +537,64 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"  # Use 6380 on host to avoid conflicts with local Redis
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+
+  # =========================================================================
+  # TRINO QUERY ENGINE
+  # =========================================================================
+  # Trino coordinator + worker for alternative query engine.
+  # Uses BERDL access control plugin for namespace isolation.
+  # Scale workers: docker compose up -d --scale trino-worker=N
+  # =========================================================================
+  trino:
+    # image: ghcr.io/berdatalakehouse/trino_access_control:main
+    # platform: linux/amd64
+    build:
+      context: ../trino_access_control
+      dockerfile: Dockerfile
+      args:
+        TRINO_VERSION: "479"
+    ports:
+      - "8083:8080"  # Trino Web UI / API
+    volumes:
+      - ./configs/trino/config.properties:/etc/trino/config.properties
+      - ./configs/trino/access-control.properties:/etc/trino/access-control.properties
+      - ./configs/trino/resource-groups.properties:/etc/trino/resource-groups.properties
+      - ./configs/trino/resource-groups.json:/etc/trino/resource-groups.json
+    depends_on:
+      - hive-metastore
+      - minio
+      - minio-manager-service
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/v1/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    stop_grace_period: 150s
+
+  trino-worker:
+    # image: ghcr.io/berdatalakehouse/trino_access_control:main
+    # platform: linux/amd64
+    build:
+      context: ../trino_access_control
+      dockerfile: Dockerfile
+      args:
+        TRINO_VERSION: "479"
+    volumes:
+      - ./configs/trino/worker-config.properties:/etc/trino/config.properties
+    depends_on:
+      trino:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/v1/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
 volumes:
   postgres_data:
   minio_data:
   redis_data:
-  users_home:  # Shared volume for all user home directories

@@ -85,6 +85,16 @@ class ErrorType(Enum):
     TOO_MANY_JOBS = (20150, "Too many concurrent jobs")
     """ The user has too many active async query jobs. """
 
+    # ----- Trino error types -----
+    TRINO_CONNECTION_ERROR = (20200, "Trino connection error")
+    """ There was an error connecting to Trino. """
+
+    TRINO_OPERATION_ERROR = (20210, "Trino operation error")
+    """ There was an error executing a Trino operation. """
+
+    TRINO_QUERY_ERROR = (20220, "Trino query error")
+    """ There was an error executing a Trino query. """
+
     REQUEST_VALIDATION_FAILED = (30010, "Request validation failed")
     """ A request to a service failed validation of the request. """
 

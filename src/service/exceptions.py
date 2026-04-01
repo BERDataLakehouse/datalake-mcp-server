@@ -164,3 +164,24 @@ class TooManyJobsError(AsyncQueryError):
     """
     An error thrown when a user has too many concurrent async jobs.
     """
+
+
+# ----- Trino errors -----
+
+
+class TrinoConnectionError(MCPServerError):
+    """
+    An error thrown when there is an issue connecting to Trino.
+    """
+
+
+class TrinoOperationError(MCPServerError):
+    """
+    An error thrown when a Trino operation fails.
+    """
+
+
+class TrinoQueryError(TrinoOperationError):
+    """
+    An error thrown when a Trino query fails.
+    """

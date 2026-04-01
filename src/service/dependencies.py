@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import grpc
 import httpx
+import trino
 from fastapi import Depends, Request
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import AnyUrl
@@ -28,8 +29,10 @@ from src.delta_lake.setup_spark_session import (
 from src.service import app_state
 from src.service.exceptions import MissingTokenError
 from src.service.http_bearer import KBaseHTTPBearer
+from src.service.models import QueryEngine
 from src.service.spark_session_pool import STANDALONE_POOL_SIZE
 from src.settings import BERDLSettings, get_settings
+from src.trino_engine.trino_connection import create_trino_connection
 
 # Initialize the KBase auth dependency for use in routes
 auth = KBaseHTTPBearer()
@@ -64,6 +67,37 @@ class SparkContext:
     app_name: str = ""
     username: str = ""
     auth_token: str | None = None
+
+
+@dataclass
+class TrinoContext:
+    """
+    Execution context for Trino operations.
+
+    Each request creates its own independent ``trino.dbapi.Connection`` with
+    the requesting user's credentials — no state is shared between requests.
+    """
+
+    connection: trino.dbapi.Connection
+    username: str = ""
+    auth_token: str | None = None
+    settings_dict: dict = field(default_factory=dict)
+
+
+def resolve_engine(requested: QueryEngine | None = None) -> QueryEngine:
+    """
+    Determine which query engine to use.
+
+    Priority: per-request override > ``QUERY_ENGINE`` env var > default ``spark``.
+    """
+    if requested is not None:
+        return requested
+    env_val = os.getenv("QUERY_ENGINE", "spark").lower()
+    try:
+        return QueryEngine(env_val)
+    except ValueError:
+        logger.warning(f"Unknown QUERY_ENGINE value '{env_val}', defaulting to spark")
+        return QueryEngine.SPARK
 
 
 def sanitize_k8s_name(name: str) -> str:
@@ -727,3 +761,75 @@ def get_spark_session(
                 spark.stop()
             except Exception as e:
                 logger.error(f"Error stopping Spark session: {e}")
+
+
+def get_trino_context(
+    request: Request,
+    settings: Annotated[BERDLSettings, Depends(get_settings)],
+) -> Generator[TrinoContext, None, None]:
+    """
+    FastAPI dependency that creates a per-request Trino connection.
+
+    Each request gets its own ``trino.dbapi.Connection`` with the
+    authenticated user's credentials.  The connection is closed at the
+    end of the request.
+    """
+    username = get_user_from_request(request)
+    auth_token = get_token_from_request(request)
+
+    if not auth_token:
+        raise Exception(
+            f"Cannot create Trino context: no auth token available for user {username}"
+        )
+
+    logger.info(f"Creating Trino context for user: {username}")
+
+    try:
+        minio_access_key, minio_secret_key = fetch_user_minio_credentials(
+            settings.GOVERNANCE_API_URL, auth_token
+        )
+    except Exception as e:
+        raise Exception(
+            f"Cannot create Trino context: failed to fetch MinIO credentials "
+            f"for user {username}: {type(e).__name__}: {e}"
+        )
+
+    conn = create_trino_connection(
+        username=username,
+        auth_token=auth_token,
+        access_key=minio_access_key,
+        secret_key=minio_secret_key,
+        trino_host=settings.TRINO_HOST,
+        trino_port=settings.TRINO_PORT,
+        hive_metastore_uri=str(settings.BERDL_HIVE_METASTORE_URI),
+        minio_endpoint_url=settings.MINIO_ENDPOINT_URL,
+        minio_secure=settings.MINIO_SECURE,
+    )
+
+    settings_dict = {
+        "USER": username,
+        "MINIO_ACCESS_KEY": minio_access_key,
+        "MINIO_SECRET_KEY": minio_secret_key,
+        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+        "MINIO_SECURE": settings.MINIO_SECURE,
+        "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        "TRINO_HOST": settings.TRINO_HOST,
+        "TRINO_PORT": settings.TRINO_PORT,
+        "GOVERNANCE_API_URL": str(settings.GOVERNANCE_API_URL),
+    }
+
+    ctx = TrinoContext(
+        connection=conn,
+        username=username,
+        auth_token=auth_token,
+        settings_dict=settings_dict,
+    )
+
+    try:
+        yield ctx
+    finally:
+        try:
+            conn.close()
+            logger.debug(f"Trino connection closed for user {username}")
+        except Exception as e:
+            logger.warning(f"Error closing Trino connection: {e}")

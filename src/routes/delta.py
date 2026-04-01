@@ -4,33 +4,35 @@ API routes for Delta Lake operations.
 Routes support full concurrency:
 - Spark Connect mode: Direct SparkSession usage
 - Standalone mode: Dispatched to ProcessPoolExecutor for isolated execution
+- Trino mode: Per-request DB-API connection (lightweight HTTP, fully concurrent)
+
+Engine selection:
+- Global default: QUERY_ENGINE env var (spark | trino, default spark)
+- Per-request override: ``engine`` field on query/select/async-submit requests
 """
 
 import logging
-from typing import Annotated, Any, Dict, List, Optional, cast
+from contextlib import contextmanager
+from typing import Annotated, Any, Dict, Generator, List, Optional, cast
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from src.delta_lake import data_store, delta_service
-from src.service.dependencies import SparkContext, auth, get_spark_context
-from src.service.query_executor import execute_query
-from src.service.spark_session_pool import run_in_spark_process
-from src.service.standalone_operations import (
-    count_table_subprocess,
-    get_db_structure_subprocess,
-    get_table_schema_subprocess,
-    list_databases_subprocess,
-    list_tables_subprocess,
-    sample_table_subprocess,
-    select_table_subprocess,
+from src.service.dependencies import (
+    SparkContext,
+    TrinoContext,
+    auth,
+    get_spark_context,
+    get_trino_context,
+    resolve_engine,
 )
-from src.settings import get_settings
 from src.service.models import (
     DatabaseListRequest,
     DatabaseListResponse,
     DatabaseStructureRequest,
     DatabaseStructureResponse,
     PaginationInfo,
+    QueryEngine,
     TableCountRequest,
     TableCountResponse,
     TableListRequest,
@@ -44,6 +46,19 @@ from src.service.models import (
     TableSelectRequest,
     TableSelectResponse,
 )
+from src.service.query_executor import execute_query, execute_query_trino
+from src.service.spark_session_pool import run_in_spark_process
+from src.service.standalone_operations import (
+    count_table_subprocess,
+    get_db_structure_subprocess,
+    get_table_schema_subprocess,
+    list_databases_subprocess,
+    list_tables_subprocess,
+    sample_table_subprocess,
+    select_table_subprocess,
+)
+from src.settings import get_settings
+from src.trino_engine import trino_data_store, trino_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/delta", tags=["Delta Lake"])
@@ -55,6 +70,31 @@ def _extract_token_from_request(request: Request) -> Optional[str]:
     if auth_header.startswith("Bearer "):
         return auth_header[7:]  # Remove "Bearer " prefix
     return None
+
+
+@contextmanager
+def _make_trino_ctx(request: Request) -> Generator[TrinoContext, None, None]:
+    """
+    Create a TrinoContext from a FastAPI request, managing its lifecycle.
+
+    Used when the route handler needs a Trino context (based on engine
+    resolution) without eagerly creating it via Depends().
+    """
+    settings = get_settings()
+    gen = get_trino_context(request, settings)
+    ctx = next(gen)
+    try:
+        yield ctx
+    finally:
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Metadata endpoints (use global QUERY_ENGINE only - no per-request override)
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -71,19 +111,23 @@ def list_databases(
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseListResponse:
-    """
-    Endpoint to list all databases in the Hive metastore.
-    Optionally filters by user/tenant namespace prefixes.
-    """
-    # Extract auth token for namespace filtering
     auth_token = None
     if body.filter_by_namespace:
         auth_token = _extract_token_from_request(http_request)
         if not auth_token:
             raise ValueError("Authorization token required for namespace filtering")
 
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    engine = resolve_engine()
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            databases = trino_data_store.get_databases_trino(
+                conn=trino_ctx.connection,
+                use_hms=body.use_hms,
+                filter_by_namespace=body.filter_by_namespace,
+                auth_token=auth_token,
+            )
+    elif ctx.is_standalone_subprocess:
         databases = run_in_spark_process(
             list_databases_subprocess,
             ctx.settings_dict,
@@ -94,7 +138,6 @@ def list_databases(
             operation_name="list_databases",
         )
     else:
-        # Use Spark Connect session directly
         databases = cast(
             list[str],
             data_store.get_databases(
@@ -119,14 +162,20 @@ def list_databases(
 )
 def list_database_tables(
     request: TableListRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableListResponse:
-    """
-    Endpoint to list tables in a specific database.
-    """
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    engine = resolve_engine()
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            tables = trino_data_store.get_tables_trino(
+                conn=trino_ctx.connection,
+                database=request.database,
+                use_hms=request.use_hms,
+            )
+    elif ctx.is_standalone_subprocess:
         tables = run_in_spark_process(
             list_tables_subprocess,
             ctx.settings_dict,
@@ -136,7 +185,6 @@ def list_database_tables(
             operation_name="list_tables",
         )
     else:
-        # Use Spark Connect session directly
         settings = get_settings()
         tables = cast(
             list[str],
@@ -161,14 +209,20 @@ def list_database_tables(
 )
 def get_table_schema(
     request: TableSchemaRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableSchemaResponse:
-    """
-    Endpoint to get the schema of a specific table in a database.
-    """
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    engine = resolve_engine()
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            columns = trino_data_store.get_table_schema_trino(
+                conn=trino_ctx.connection,
+                database=request.database,
+                table=request.table,
+            )
+    elif ctx.is_standalone_subprocess:
         columns = run_in_spark_process(
             get_table_schema_subprocess,
             ctx.settings_dict,
@@ -178,7 +232,6 @@ def get_table_schema(
             operation_name="get_table_schema",
         )
     else:
-        # Use Spark Connect session directly
         columns = cast(
             list[str],
             data_store.get_table_schema(
@@ -201,14 +254,20 @@ def get_table_schema(
 )
 def get_database_structure(
     request: DatabaseStructureRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseStructureResponse:
-    """
-    Endpoint to get the complete structure of all databases.
-    """
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    engine = resolve_engine()
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            structure = trino_data_store.get_db_structure_trino(
+                conn=trino_ctx.connection,
+                with_schema=request.with_schema,
+                use_hms=request.use_hms,
+            )
+    elif ctx.is_standalone_subprocess:
         structure = run_in_spark_process(
             get_db_structure_subprocess,
             ctx.settings_dict,
@@ -218,7 +277,6 @@ def get_database_structure(
             operation_name="get_db_structure",
         )
     else:
-        # Use Spark Connect session directly
         settings = get_settings()
         structure = cast(
             dict[str, list[str] | dict[str, list[str]]],
@@ -243,17 +301,22 @@ def get_database_structure(
 )
 def count_table(
     request: TableCountRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableCountResponse:
-    """
-    Endpoint to count rows in a specific Delta table.
-    """
-    # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
+    engine = resolve_engine()
 
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            count = trino_service.count_via_trino(
+                conn=trino_ctx.connection,
+                database=request.database,
+                table=request.table,
+                username=username,
+            )
+    elif ctx.is_standalone_subprocess:
         count = run_in_spark_process(
             count_table_subprocess,
             ctx.settings_dict,
@@ -264,7 +327,6 @@ def count_table(
             operation_name="count_table",
         )
     else:
-        # Use Spark Connect session directly
         count = delta_service.count_delta_table(
             spark=ctx.spark,
             database=request.database,
@@ -284,17 +346,25 @@ def count_table(
 )
 def sample_table(
     request: TableSampleRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> TableSampleResponse:
-    """
-    Endpoint to get a sample of data from a specific Delta table.
-    """
-    # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
+    engine = resolve_engine()
 
-    if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            sample: List[Dict[str, Any]] = trino_service.sample_via_trino(
+                conn=trino_ctx.connection,
+                database=request.database,
+                table=request.table,
+                limit=request.limit,
+                columns=request.columns,
+                where_clause=request.where_clause,
+                username=username,
+            )
+    elif ctx.is_standalone_subprocess:
         sample = run_in_spark_process(
             sample_table_subprocess,
             ctx.settings_dict,
@@ -308,8 +378,7 @@ def sample_table(
             operation_name="sample_table",
         )
     else:
-        # Use Spark Connect session directly
-        sample: List[Dict[str, Any]] = delta_service.sample_delta_table(
+        sample = delta_service.sample_delta_table(
             spark=ctx.spark,
             database=request.database,
             table=request.table,
@@ -319,6 +388,11 @@ def sample_table(
             username=username,
         )
     return TableSampleResponse(sample=sample)
+
+
+# ---------------------------------------------------------------------------
+# Query endpoints (support per-request engine override + deprecated)
+# ---------------------------------------------------------------------------
 
 
 @router.post(
@@ -339,6 +413,7 @@ def sample_table(
 )
 def query_table(
     request: TableQueryRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     response: Response,
     auth=Depends(auth),
@@ -348,13 +423,22 @@ def query_table(
 
     DEPRECATED: Use async endpoint /delta/tables/query/async/submit instead.
     """
-    # Set deprecation warning header
     response.headers["Warning"] = (
         '299 - "Deprecated API: Use endpoint /delta/tables/query/async/submit for asynchronous query execution"'
     )
 
-    # Pass username to service layer for user-scoped cache isolation
     username = auth.user if auth else None
+    engine = resolve_engine(request.engine)
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            return execute_query_trino(
+                trino_ctx.connection,
+                request.query,
+                request.limit,
+                request.offset,
+                username,
+            )
 
     return execute_query(ctx, request.query, request.limit, request.offset, username)
 
@@ -363,33 +447,44 @@ def query_table(
     "/tables/select",
     response_model=TableSelectResponse,
     status_code=status.HTTP_200_OK,
-    summary="Execute a structured SELECT query",
+    summary="[DEPRECATED] Execute a structured SELECT query",
     description=(
         "Builds and executes a SELECT query from structured parameters. "
         "Supports column selection, aggregations (COUNT, SUM, AVG, MIN, MAX), "
         "JOINs, WHERE filters, GROUP BY, HAVING, ORDER BY, DISTINCT, and pagination. "
         "The backend builds the query safely, preventing SQL injection."
+        "\n\nDEPRECATED: This endpoint is deprecated. Use endpoint /delta/tables/query/async/submit for asynchronous query execution."
     ),
     operation_id="select_delta_table",
 )
 def select_table(
     request: TableSelectRequest,
+    http_request: Request,
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
+    response: Response,
     auth=Depends(auth),
 ) -> TableSelectResponse:
     """
     Endpoint to execute a structured SELECT query with pagination support.
 
-    This endpoint allows users to build complex queries without writing raw SQL.
-    The backend constructs the query from the provided parameters, ensuring
-    security and proper escaping of all values.
+    DEPRECATED: Use async endpoint /delta/tables/query/async/submit instead.
     """
-    # Pass username to service layer for user-scoped cache isolation
+    response.headers["Warning"] = (
+        '299 - "Deprecated API: Use endpoint /delta/tables/query/async/submit for asynchronous query execution"'
+    )
+
     username = auth.user if auth else None
+    engine = resolve_engine(request.engine)
+
+    if engine == QueryEngine.TRINO:
+        with _make_trino_ctx(http_request) as trino_ctx:
+            return trino_service.select_via_trino(
+                conn=trino_ctx.connection,
+                request=request,
+                username=username,
+            )
 
     if ctx.is_standalone_subprocess:
-        # Dispatch to process pool for Standalone mode
-        # Convert request to dict for pickling
         request_dict = request.model_dump()
         result = run_in_spark_process(
             select_table_subprocess,
@@ -399,13 +494,11 @@ def select_table(
             app_name=ctx.app_name,
             operation_name="select_table",
         )
-        # Result is a dict, need to convert back to response model
         return TableSelectResponse(
             data=result["data"],
             pagination=PaginationInfo(**result["pagination"]),
         )
     else:
-        # Use Spark Connect session directly
         return delta_service.select_from_delta_table(
             spark=ctx.spark,
             request=request,
