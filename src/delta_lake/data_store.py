@@ -420,7 +420,10 @@ def get_db_structure(
 
         for db in databases:
             tables = get_tables(
-                database=db, spark=session, use_hms=use_hms, return_json=False,
+                database=db,
+                spark=session,
+                use_hms=use_hms,
+                return_json=False,
                 settings=settings,
             )
             if with_schema and isinstance(tables, list):

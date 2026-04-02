@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from src.routes import delta
 from src.routes.delta import _extract_token_from_request, _make_trino_ctx, router
 from src.service.dependencies import SparkContext, TrinoContext, get_spark_context, auth
+from src.service.exception_handlers import universal_error_handler
 from src.service.models import QueryEngine
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
@@ -476,8 +477,6 @@ class TestGetDbStructureEndpoint:
 
     def test_get_db_structure_namespace_filter_missing_token(self, mock_app):
         """Test that filter_by_namespace=True without Authorization header returns 401."""
-        from src.service.exception_handlers import universal_error_handler
-
         app, spark, user = mock_app
         app.add_exception_handler(Exception, universal_error_handler)
         client = TestClient(app, raise_server_exceptions=False)
@@ -499,7 +498,11 @@ class TestGetDbStructureEndpoint:
         ) as mock_struct:
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True, "filter_by_namespace": True},
+                json={
+                    "with_schema": False,
+                    "use_hms": True,
+                    "filter_by_namespace": True,
+                },
                 headers={"Authorization": "Bearer test-kbase-token"},
             )
 
