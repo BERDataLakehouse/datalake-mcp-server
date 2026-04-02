@@ -378,15 +378,20 @@ def get_db_structure(
     with_schema: bool = False,
     use_hms: bool = True,
     return_json: bool = True,
+    filter_by_namespace: bool = True,
+    auth_token: Optional[str] = None,
     settings: Optional[BERDLSettings] = None,
 ) -> Union[str, Dict]:
-    """Get the structure of all databases in the Hive metastore.
+    """Get the structure of databases in the Hive metastore.
 
     Args:
         spark: Optional SparkSession to use for operations
         with_schema: Whether to include table schemas
         use_hms: Whether to use Hive Metastore client for metadata retrieval
         return_json: Whether to return the result as a JSON string
+        filter_by_namespace: Whether to filter databases by user/group ownership
+                           and shared access (delegates to get_databases)
+        auth_token: KBase auth token (required if filter_by_namespace is True)
         settings: BERDLSettings instance (required if use_hms is True)
 
     Returns:
@@ -404,7 +409,12 @@ def get_db_structure(
         session: SparkSession,
     ) -> Dict[str, Union[List[str], Dict[str, List[str]]]]:
         db_structure = {}
-        databases = get_databases(spark=session, return_json=False)
+        databases = get_databases(
+            spark=session,
+            return_json=False,
+            filter_by_namespace=filter_by_namespace,
+            auth_token=auth_token,
+        )
 
         for db in databases:
             tables = get_tables(database=db, spark=session, return_json=False)
@@ -419,7 +429,14 @@ def get_db_structure(
         if settings is None:
             settings = get_settings()
         db_structure = {}
-        databases = hive_metastore.get_databases(settings=settings)
+        databases = get_databases(
+            spark=spark,
+            use_hms=True,
+            return_json=False,
+            filter_by_namespace=filter_by_namespace,
+            auth_token=auth_token,
+            settings=settings,
+        )
 
         for db in databases:
             tables = hive_metastore.get_tables(database=db, settings=settings)

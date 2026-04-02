@@ -457,6 +457,7 @@ class TestGetDbStructure:
                         use_hms=True,
                         with_schema=False,
                         return_json=False,
+                        filter_by_namespace=False,
                         settings=mock_settings,
                     )
 
@@ -479,6 +480,7 @@ class TestGetDbStructure:
                         use_hms=True,
                         with_schema=False,
                         return_json=True,
+                        filter_by_namespace=False,
                         settings=mock_settings,
                     )
 
@@ -546,6 +548,7 @@ class TestSparkSessionRequirement:
                             use_hms=True,
                             with_schema=True,
                             return_json=False,
+                            filter_by_namespace=False,
                             settings=mock_settings,
                         )
 
@@ -731,6 +734,7 @@ class TestGetDbStructureViaSpark:
                     use_hms=False,
                     with_schema=False,
                     return_json=False,
+                    filter_by_namespace=False,
                     settings=mock_settings,
                 )
 
@@ -762,6 +766,7 @@ class TestGetDbStructureViaSpark:
                             use_hms=True,
                             with_schema=True,
                             return_json=False,
+                            filter_by_namespace=False,
                             settings=mock_settings,
                         )
 
@@ -834,7 +839,10 @@ class TestSettingsNoneFallback:
                     return_value=["t1"],
                 ):
                     result = data_store.get_db_structure(
-                        use_hms=True, return_json=False, settings=None
+                        use_hms=True,
+                        return_json=False,
+                        filter_by_namespace=False,
+                        settings=None,
                     )
 
         assert result == {"db1": ["t1"]}
@@ -913,6 +921,7 @@ class TestGetDbStructureViaSparkWithSchema:
                         use_hms=False,
                         with_schema=True,
                         return_json=False,
+                        filter_by_namespace=False,
                         settings=mock_settings,
                     )
 

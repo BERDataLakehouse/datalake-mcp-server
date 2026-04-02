@@ -136,6 +136,12 @@ class DatabaseStructureRequest(BaseModel):
             description="Whether to use Hive Metastore client for faster metadata retrieval"
         ),
     ] = True
+    filter_by_namespace: Annotated[
+        bool,
+        Field(
+            description="Whether to filter databases by user/tenant namespace prefixes"
+        ),
+    ] = True
 
 
 class DatabaseStructureResponse(BaseModel):

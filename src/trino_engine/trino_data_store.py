@@ -114,13 +114,21 @@ def get_db_structure_trino(
     conn: trino.dbapi.Connection,
     with_schema: bool = False,
     use_hms: bool = True,
+    filter_by_namespace: bool = True,
+    auth_token: str | None = None,
     settings: BERDLSettings | None = None,
 ) -> dict[str, Any]:
-    """Get the complete structure of all databases."""
+    """Get the structure of databases, filtered by user namespace by default."""
     if settings is None:
         settings = get_settings()
 
-    databases = get_databases_trino(conn, use_hms=use_hms, settings=settings)
+    databases = get_databases_trino(
+        conn,
+        use_hms=use_hms,
+        filter_by_namespace=filter_by_namespace,
+        auth_token=auth_token,
+        settings=settings,
+    )
 
     structure: dict[str, Any] = {}
     for db in databases:

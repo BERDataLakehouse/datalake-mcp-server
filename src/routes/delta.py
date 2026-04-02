@@ -258,6 +258,12 @@ def get_database_structure(
     ctx: Annotated[SparkContext, Depends(get_spark_context)],
     auth=Depends(auth),
 ) -> DatabaseStructureResponse:
+    auth_token = None
+    if request.filter_by_namespace:
+        auth_token = _extract_token_from_request(http_request)
+        if not auth_token:
+            raise ValueError("Authorization token required for namespace filtering")
+
     engine = resolve_engine()
 
     if engine == QueryEngine.TRINO:
@@ -266,6 +272,8 @@ def get_database_structure(
                 conn=trino_ctx.connection,
                 with_schema=request.with_schema,
                 use_hms=request.use_hms,
+                filter_by_namespace=request.filter_by_namespace,
+                auth_token=auth_token,
             )
     elif ctx.is_standalone_subprocess:
         structure = run_in_spark_process(
@@ -273,6 +281,8 @@ def get_database_structure(
             ctx.settings_dict,
             with_schema=request.with_schema,
             use_hms=request.use_hms,
+            filter_by_namespace=request.filter_by_namespace,
+            auth_token=auth_token,
             app_name=ctx.app_name,
             operation_name="get_db_structure",
         )
@@ -285,6 +295,8 @@ def get_database_structure(
                 with_schema=request.with_schema,
                 use_hms=request.use_hms,
                 return_json=False,
+                filter_by_namespace=request.filter_by_namespace,
+                auth_token=auth_token,
                 settings=settings,
             ),
         )

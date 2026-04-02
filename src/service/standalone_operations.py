@@ -389,6 +389,8 @@ def get_db_structure_subprocess(
     settings_dict: dict,
     with_schema: bool = False,
     use_hms: bool = True,
+    filter_by_namespace: bool = True,
+    auth_token: str | None = None,
     app_name: str = "mcp_structure",
 ) -> dict[str, Any]:
     """
@@ -398,6 +400,8 @@ def get_db_structure_subprocess(
         settings_dict: Picklable dict of BERDLSettings values
         with_schema: Whether to include table schemas
         use_hms: Whether to use Hive Metastore direct query
+        filter_by_namespace: Whether to filter databases by user namespace
+        auth_token: KBase auth token (required if filter_by_namespace is True)
         app_name: Spark application name
 
     Returns:
@@ -413,6 +417,8 @@ def get_db_structure_subprocess(
             with_schema=with_schema,
             use_hms=use_hms,
             return_json=False,
+            filter_by_namespace=filter_by_namespace,
+            auth_token=auth_token,
             settings=settings,
         )
         return dict(result)
