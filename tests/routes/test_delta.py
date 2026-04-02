@@ -349,7 +349,7 @@ class TestListDatabasesEndpoint:
         ):
             response = client.post(
                 "/delta/databases/list",
-                json={},
+                json={"filter_by_namespace": False},
             )
 
         assert response.status_code == 200
@@ -422,7 +422,7 @@ class TestGetDbStructureEndpoint:
         ):
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={"with_schema": False, "filter_by_namespace": False},
             )
 
         assert response.status_code == 200
@@ -884,7 +884,7 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/list",
-                json={},
+                json={"filter_by_namespace": False},
             )
 
         assert response.status_code == 200
@@ -998,7 +998,7 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False},
+                json={"with_schema": False, "filter_by_namespace": False},
             )
 
         assert response.status_code == 200
@@ -1245,7 +1245,7 @@ class TestTrinoEngineDispatch:
         ):
             response = client.post(
                 "/delta/databases/list",
-                json={"use_hms": True, "filter_by_namespace": False},
+                json={"filter_by_namespace": False},
             )
 
         assert response.status_code == 200
@@ -1269,7 +1269,7 @@ class TestTrinoEngineDispatch:
         ):
             response = client.post(
                 "/delta/databases/list",
-                json={"use_hms": True, "filter_by_namespace": True},
+                json={"filter_by_namespace": True},
                 headers={"Authorization": "Bearer test_token_123"},
             )
 
@@ -1289,7 +1289,7 @@ class TestTrinoEngineDispatch:
         ):
             response = client.post(
                 "/delta/databases/tables/list",
-                json={"database": "mydb", "use_hms": True},
+                json={"database": "mydb"},
             )
 
         assert response.status_code == 200
@@ -1329,7 +1329,7 @@ class TestTrinoEngineDispatch:
         ):
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={"with_schema": False, "filter_by_namespace": False},
             )
 
         assert response.status_code == 200

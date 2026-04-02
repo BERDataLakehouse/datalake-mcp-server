@@ -64,7 +64,12 @@ class DeepHealthResponse(BaseModel):
 class DatabaseListRequest(BaseModel):
     """Request model for listing databases from Iceberg catalogs."""
 
-    pass
+    filter_by_namespace: Annotated[
+        bool,
+        Field(
+            description="Whether to filter databases by user/tenant namespace prefixes"
+        ),
+    ] = True
 
 
 class DatabaseListResponse(BaseModel):
@@ -112,6 +117,12 @@ class DatabaseStructureRequest(BaseModel):
     with_schema: Annotated[
         bool, Field(description="Whether to include table schemas in the response")
     ] = False
+    filter_by_namespace: Annotated[
+        bool,
+        Field(
+            description="Whether to filter databases by user/tenant namespace prefixes"
+        ),
+    ] = True
 
 
 class DatabaseStructureResponse(BaseModel):

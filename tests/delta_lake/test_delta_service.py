@@ -1601,9 +1601,10 @@ class TestCheckExists:
 
     def test_returns_true_when_both_exist(self):
         """Test that _check_exists returns True when database and table exist (line 183)."""
+        mock_spark = MagicMock()
         with patch("src.delta_lake.delta_service.database_exists", return_value=True):
             with patch("src.delta_lake.delta_service.table_exists", return_value=True):
-                result = delta_service._check_exists("mydb", "mytable")
+                result = delta_service._check_exists("mydb", "mytable", spark=mock_spark)
         assert result is True
 
 

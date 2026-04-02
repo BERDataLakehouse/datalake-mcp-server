@@ -181,6 +181,9 @@ def get_db_structure(
     spark: Optional[SparkSession] = None,
     with_schema: bool = False,
     return_json: bool = True,
+    filter_by_namespace: bool = False,
+    auth_token: Optional[str] = None,
+    settings: Optional[Any] = None,
 ) -> Union[str, Dict]:
     """
     Get the structure of all accessible Iceberg namespaces.
@@ -189,6 +192,10 @@ def get_db_structure(
         spark: SparkSession to use (required in MCP server context)
         with_schema: Whether to include table column names
         return_json: Whether to return the result as a JSON string
+        filter_by_namespace: Whether to filter databases by user/group ownership
+                           and shared access (delegates to get_databases)
+        auth_token: KBase auth token (required if filter_by_namespace is True)
+        settings: BERDLSettings instance (unused in Iceberg mode, kept for API compat)
 
     Returns:
         Dictionary mapping ``catalog.namespace`` to table lists or schema dicts::

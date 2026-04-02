@@ -213,10 +213,18 @@ class TestGetDbStructureTrino:
         mock_tables.return_value = ["t1"]
         conn, _ = mock_conn
 
-        get_db_structure_trino(conn, with_schema=False, settings=None)
+        get_db_structure_trino(
+            conn, with_schema=False, filter_by_namespace=False, settings=None
+        )
 
         mock_get_settings.assert_called_once()
-        mock_dbs.assert_called_once_with(conn, use_hms=True, settings=fallback_settings)
+        mock_dbs.assert_called_once_with(
+            conn,
+            use_hms=True,
+            filter_by_namespace=False,
+            auth_token=None,
+            settings=fallback_settings,
+        )
 
     @patch("src.trino_engine.trino_data_store.get_table_schema_trino")
     @patch("src.trino_engine.trino_data_store.get_tables_trino")
@@ -228,7 +236,9 @@ class TestGetDbStructureTrino:
         mock_dbs.return_value = ["db1"]
         mock_tables.return_value = ["t1", "t2"]
 
-        result = get_db_structure_trino(conn, with_schema=False, settings=mock_settings)
+        result = get_db_structure_trino(
+            conn, with_schema=False, filter_by_namespace=False, settings=mock_settings
+        )
 
         assert result == {"db1": ["t1", "t2"]}
         mock_schema.assert_not_called()
@@ -244,6 +254,8 @@ class TestGetDbStructureTrino:
         mock_tables.return_value = ["t1"]
         mock_schema.return_value = ["id", "name"]
 
-        result = get_db_structure_trino(conn, with_schema=True, settings=mock_settings)
+        result = get_db_structure_trino(
+            conn, with_schema=True, filter_by_namespace=False, settings=mock_settings
+        )
 
         assert result == {"db1": {"t1": ["id", "name"]}}
