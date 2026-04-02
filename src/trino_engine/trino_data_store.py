@@ -114,7 +114,7 @@ def get_db_structure_trino(
     conn: trino.dbapi.Connection,
     with_schema: bool = False,
     use_hms: bool = True,
-    filter_by_namespace: bool = True,
+    filter_by_namespace: bool = False,
     auth_token: str | None = None,
     settings: BERDLSettings | None = None,
 ) -> dict[str, Any]:

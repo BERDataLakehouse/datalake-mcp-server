@@ -474,6 +474,41 @@ class TestGetDbStructureEndpoint:
         data = response.json()
         assert data["structure"] == {"db1": ["t1", "t2"]}
 
+    def test_get_db_structure_namespace_filter_missing_token(self, mock_app):
+        """Test that filter_by_namespace=True without Authorization header returns 401."""
+        from src.service.exception_handlers import universal_error_handler
+
+        app, spark, user = mock_app
+        app.add_exception_handler(Exception, universal_error_handler)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/delta/databases/structure",
+            json={"with_schema": False, "use_hms": True, "filter_by_namespace": True},
+        )
+
+        assert response.status_code == 401
+
+    def test_get_db_structure_namespace_filter_with_token(self, delta_client):
+        """Test that filter_by_namespace=True with Authorization header passes token through."""
+        client, spark, user = delta_client
+
+        with patch(
+            "src.routes.delta.data_store.get_db_structure",
+            return_value={"u_testuser_db": ["t1"]},
+        ) as mock_struct:
+            response = client.post(
+                "/delta/databases/structure",
+                json={"with_schema": False, "use_hms": True, "filter_by_namespace": True},
+                headers={"Authorization": "Bearer test-kbase-token"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["structure"] == {"u_testuser_db": ["t1"]}
+        call_kwargs = mock_struct.call_args
+        assert call_kwargs.kwargs["filter_by_namespace"] is True
+        assert call_kwargs.kwargs["auth_token"] == "test-kbase-token"
+
 
 class TestCountTableEndpoint:
     """Tests for the /delta/tables/count endpoint."""

@@ -378,7 +378,7 @@ def get_db_structure(
     with_schema: bool = False,
     use_hms: bool = True,
     return_json: bool = True,
-    filter_by_namespace: bool = True,
+    filter_by_namespace: bool = False,
     auth_token: Optional[str] = None,
     settings: Optional[BERDLSettings] = None,
 ) -> Union[str, Dict]:
@@ -411,13 +411,18 @@ def get_db_structure(
         db_structure = {}
         databases = get_databases(
             spark=session,
+            use_hms=use_hms,
             return_json=False,
             filter_by_namespace=filter_by_namespace,
             auth_token=auth_token,
+            settings=settings,
         )
 
         for db in databases:
-            tables = get_tables(database=db, spark=session, return_json=False)
+            tables = get_tables(
+                database=db, spark=session, use_hms=use_hms, return_json=False,
+                settings=settings,
+            )
             if with_schema and isinstance(tables, list):
                 db_structure[db] = _get_tables_with_schemas(db, tables, session)
             else:

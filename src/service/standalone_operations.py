@@ -389,7 +389,7 @@ def get_db_structure_subprocess(
     settings_dict: dict,
     with_schema: bool = False,
     use_hms: bool = True,
-    filter_by_namespace: bool = True,
+    filter_by_namespace: bool = False,
     auth_token: str | None = None,
     app_name: str = "mcp_structure",
 ) -> dict[str, Any]:

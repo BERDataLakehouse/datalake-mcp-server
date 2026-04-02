@@ -18,6 +18,7 @@ from typing import Annotated, Any, Dict, Generator, List, Optional, cast
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from src.delta_lake import data_store, delta_service
+from src.service.exceptions import MissingTokenError
 from src.service.dependencies import (
     SparkContext,
     TrinoContext,
@@ -115,7 +116,9 @@ def list_databases(
     if body.filter_by_namespace:
         auth_token = _extract_token_from_request(http_request)
         if not auth_token:
-            raise ValueError("Authorization token required for namespace filtering")
+            raise MissingTokenError(
+                "Authorization token required for namespace filtering"
+            )
 
     engine = resolve_engine()
 
@@ -262,7 +265,9 @@ def get_database_structure(
     if request.filter_by_namespace:
         auth_token = _extract_token_from_request(http_request)
         if not auth_token:
-            raise ValueError("Authorization token required for namespace filtering")
+            raise MissingTokenError(
+                "Authorization token required for namespace filtering"
+            )
 
     engine = resolve_engine()
 
