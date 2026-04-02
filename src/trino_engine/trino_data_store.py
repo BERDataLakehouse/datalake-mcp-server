@@ -19,6 +19,7 @@ from src.delta_lake.data_store import (
     _extract_databases_from_paths,
 )
 from src.service.exceptions import TrinoOperationError
+from src.trino_engine.trino_service import _validate_trino_identifier
 from src.settings import BERDLSettings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ def get_tables_trino(
     if use_hms:
         return hive_metastore.get_tables(database=database, settings=settings)
 
+    _validate_trino_identifier(database, "database")
     try:
         cursor = conn.cursor()
         cursor.execute(f'SHOW TABLES FROM "{database}"')
@@ -96,6 +98,8 @@ def get_table_schema_trino(
     table: str,
 ) -> list[str]:
     """Get column names for a table via Trino SHOW COLUMNS."""
+    _validate_trino_identifier(database, "database")
+    _validate_trino_identifier(table, "table")
     try:
         cursor = conn.cursor()
         cursor.execute(f'SHOW COLUMNS FROM "{database}"."{table}"')

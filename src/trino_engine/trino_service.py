@@ -21,10 +21,15 @@ from src.delta_lake.delta_service import (
     CACHE_EXPIRY_SECONDS,
     _check_query_is_valid,
     _is_non_paginatable_query,
+    _validate_identifier,
     build_select_query as _build_select_query_spark,
     _check_exists,
 )
-from src.service.exceptions import TrinoOperationError, TrinoQueryError
+from src.service.exceptions import (
+    SparkQueryError,
+    TrinoOperationError,
+    TrinoQueryError,
+)
 from src.service.models import (
     PaginationInfo,
     TableQueryResponse,
@@ -33,6 +38,19 @@ from src.service.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Identifier validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_trino_identifier(name: str, identifier_type: str = "identifier") -> None:
+    """Validate a SQL identifier, raising TrinoQueryError on failure."""
+    try:
+        _validate_identifier(name, identifier_type)
+    except SparkQueryError as e:
+        raise TrinoQueryError(str(e)) from e
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +190,9 @@ def query_via_trino(
 
     Reuses ``_check_query_is_valid()`` from delta_service (engine-agnostic).
     """
+    # Translate Spark SQL dialect (backticks, LIMIT/OFFSET order) to Trino
+    query = _spark_sql_to_trino(query)
+
     _check_query_is_valid(query)
 
     if _is_non_paginatable_query(query):
@@ -229,21 +250,16 @@ def query_via_trino(
         results = _cursor_to_dicts(cursor)
         logger.info(f"Trino query returned {len(results)} rows.")
 
-        if len(results) < limit:
-            total_count = offset + len(results)
-            has_more = False
+        # Always get accurate total_count via COUNT query
+        cached_count = _get_from_cache(count_namespace, count_cache_key)
+        if cached_count:
+            total_count = cached_count[0]["count"]
         else:
-            cached_count = _get_from_cache(count_namespace, count_cache_key)
-            if cached_count:
-                total_count = cached_count[0]["count"]
-            else:
-                count_query = f"SELECT COUNT(*) AS cnt FROM ({base_query}) AS subquery"
-                cursor.execute(count_query)
-                total_count = cursor.fetchone()[0]
-                _store_in_cache(
-                    count_namespace, count_cache_key, [{"count": total_count}]
-                )
-            has_more = (offset + len(results)) < total_count
+            count_query = f"SELECT COUNT(*) AS cnt FROM ({base_query}) AS subquery"
+            cursor.execute(count_query)
+            total_count = cursor.fetchone()[0]
+            _store_in_cache(count_namespace, count_cache_key, [{"count": total_count}])
+        has_more = (offset + len(results)) < total_count
 
         pagination = PaginationInfo(
             limit=limit,
@@ -283,6 +299,8 @@ def count_via_trino(
         logger.info(f"Cache hit for count on {database}.{table}")
         return cached[0]["count"]
 
+    _validate_trino_identifier(database, "database")
+    _validate_trino_identifier(table, "table")
     _check_exists(database, table)
     full_table_name = f'"{database}"."{table}"'
     logger.info(f"Counting rows in {full_table_name} via Trino")
@@ -330,6 +348,12 @@ def sample_via_trino(
 
     if not 0 < limit <= MAX_SAMPLE_ROWS:
         raise ValueError(f"Limit must be between 1 and {MAX_SAMPLE_ROWS}, got {limit}")
+
+    _validate_trino_identifier(database, "database")
+    _validate_trino_identifier(table, "table")
+    if columns:
+        for col in columns:
+            _validate_trino_identifier(col, "column")
 
     _check_exists(database, table)
     full_table_name = f'"{database}"."{table}"'

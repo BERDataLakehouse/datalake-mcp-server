@@ -20,6 +20,7 @@ from src.trino_engine.trino_service import (
     _cursor_to_dicts,
     _generate_cache_key,
     _store_in_cache,
+    _validate_trino_identifier,
     count_via_trino,
     query_via_trino,
     sample_via_trino,
@@ -108,6 +109,37 @@ class TestStoreInCache:
 
 
 # =============================================================================
+# _validate_trino_identifier Tests
+# =============================================================================
+
+
+class TestValidateTrinoIdentifier:
+    """Tests for _validate_trino_identifier wrapper."""
+
+    def test_valid_identifiers_pass(self):
+        _validate_trino_identifier("mydb", "database")
+        _validate_trino_identifier("my_table", "table")
+        _validate_trino_identifier("_private", "column")
+        _validate_trino_identifier("Col123", "column")
+
+    def test_invalid_identifier_raises_trino_query_error(self):
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            _validate_trino_identifier('"; DROP TABLE --', "database")
+
+    def test_empty_identifier_raises(self):
+        with pytest.raises(TrinoQueryError, match="Invalid table"):
+            _validate_trino_identifier("", "table")
+
+    def test_identifier_with_spaces_raises(self):
+        with pytest.raises(TrinoQueryError, match="Invalid column"):
+            _validate_trino_identifier("col name", "column")
+
+    def test_identifier_with_special_chars_raises(self):
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            _validate_trino_identifier("my-db", "database")
+
+
+# =============================================================================
 # query_via_trino Tests
 # =============================================================================
 
@@ -142,11 +174,52 @@ class TestQueryViaTrino:
         conn, cursor = mock_conn
         cursor.description = [("id",)]
         cursor.fetchall.return_value = [(1,)]
+        # COUNT query returns total_count=1
+        cursor.fetchone.return_value = (1,)
 
         result = query_via_trino(conn, "SELECT id FROM t", limit=10, offset=0)
 
         assert result.pagination.has_more is False
         assert result.pagination.total_count == 1
+
+    @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
+    @patch("src.trino_engine.trino_service._store_in_cache")
+    @patch("src.trino_engine.trino_service._check_query_is_valid")
+    def test_offset_past_end_returns_correct_total_count(
+        self, mock_validate, mock_store, mock_cache_get, mock_conn
+    ):
+        """Offset beyond total rows should still return accurate total_count."""
+        conn, cursor = mock_conn
+        cursor.description = [("id",)]
+        # No rows returned (offset=100, but only 10 rows exist)
+        cursor.fetchall.return_value = []
+        # COUNT query returns the true total
+        cursor.fetchone.return_value = (10,)
+
+        result = query_via_trino(conn, "SELECT id FROM t", limit=10, offset=100)
+
+        assert result.pagination.total_count == 10
+        assert result.pagination.has_more is False
+        assert result.result == []
+
+    @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
+    @patch("src.trino_engine.trino_service._store_in_cache")
+    @patch("src.trino_engine.trino_service._check_query_is_valid")
+    def test_backtick_query_translated_to_double_quotes(
+        self, mock_validate, mock_store, mock_cache_get, mock_conn
+    ):
+        """Spark-style backtick identifiers should be converted to double quotes."""
+        conn, cursor = mock_conn
+        cursor.description = [("id",)]
+        cursor.fetchall.return_value = [(1,)]
+        cursor.fetchone.return_value = (1,)
+
+        query_via_trino(conn, "SELECT * FROM `mydb`.`mytable`", limit=10, offset=0)
+
+        # Verify the executed SQL uses double quotes, not backticks
+        executed_sql = cursor.execute.call_args_list[0].args[0]
+        assert "`" not in executed_sql
+        assert '"mydb"."mytable"' in executed_sql
 
     @patch("src.trino_engine.trino_service._check_query_is_valid")
     def test_limit_exceeds_max_rows_raises(self, mock_validate, mock_conn):
@@ -321,6 +394,16 @@ class TestCountViaTrino:
         with pytest.raises(TrinoOperationError, match="Failed to count"):
             count_via_trino(conn, "mydb", "mytable")
 
+    def test_invalid_database_raises(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            count_via_trino(conn, "my;db", "mytable")
+
+    def test_invalid_table_raises(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid table"):
+            count_via_trino(conn, "mydb", "my table")
+
 
 # =============================================================================
 # sample_via_trino Tests
@@ -388,6 +471,23 @@ class TestSampleViaTrino:
         conn, _ = mock_conn
         with pytest.raises(ValueError, match="Limit must be"):
             sample_via_trino(conn, "mydb", "mytable", limit=0)
+
+    def test_invalid_database_raises(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            sample_via_trino(conn, "bad;db", "mytable", limit=5)
+
+    def test_invalid_table_raises(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid table"):
+            sample_via_trino(conn, "mydb", "DROP TABLE", limit=5)
+
+    def test_invalid_column_raises(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid column"):
+            sample_via_trino(
+                conn, "mydb", "mytable", limit=5, columns=["id", "1; DROP"]
+            )
 
 
 # =============================================================================

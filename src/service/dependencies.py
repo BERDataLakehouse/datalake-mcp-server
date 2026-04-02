@@ -27,7 +27,7 @@ from src.delta_lake.setup_spark_session import (
     get_spark_session_with_retry as _get_spark_session_with_retry,
 )
 from src.service import app_state
-from src.service.exceptions import MissingTokenError
+from src.service.exceptions import MissingTokenError, TrinoConnectionError
 from src.service.http_bearer import KBaseHTTPBearer
 from src.service.models import QueryEngine
 from src.service.spark_session_pool import STANDALONE_POOL_SIZE
@@ -778,7 +778,7 @@ def get_trino_context(
     auth_token = get_token_from_request(request)
 
     if not auth_token:
-        raise Exception(
+        raise MissingTokenError(
             f"Cannot create Trino context: no auth token available for user {username}"
         )
 
@@ -789,10 +789,10 @@ def get_trino_context(
             settings.GOVERNANCE_API_URL, auth_token
         )
     except Exception as e:
-        raise Exception(
+        raise TrinoConnectionError(
             f"Cannot create Trino context: failed to fetch MinIO credentials "
             f"for user {username}: {type(e).__name__}: {e}"
-        )
+        ) from e
 
     conn = create_trino_connection(
         username=username,

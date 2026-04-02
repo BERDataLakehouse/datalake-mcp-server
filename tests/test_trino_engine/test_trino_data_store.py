@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.service.exceptions import TrinoOperationError
+from src.service.exceptions import TrinoOperationError, TrinoQueryError
 from src.trino_engine.trino_data_store import (
     get_databases_trino,
     get_db_structure_trino,
@@ -210,6 +210,13 @@ class TestGetTablesTrino:
         with pytest.raises(TrinoOperationError, match="Failed to list tables"):
             get_tables_trino(conn, "mydb", use_hms=False, settings=mock_settings)
 
+    def test_invalid_database_rejects_injection(self, mock_conn, mock_settings):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            get_tables_trino(
+                conn, '"; DROP TABLE --', use_hms=False, settings=mock_settings
+            )
+
 
 # =============================================================================
 # get_table_schema_trino Tests
@@ -237,6 +244,16 @@ class TestGetTableSchemaTrino:
 
         with pytest.raises(TrinoOperationError, match="Failed to get schema"):
             get_table_schema_trino(conn, "mydb", "users")
+
+    def test_invalid_database_rejects_injection(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid database"):
+            get_table_schema_trino(conn, "bad;db", "users")
+
+    def test_invalid_table_rejects_injection(self, mock_conn):
+        conn, _ = mock_conn
+        with pytest.raises(TrinoQueryError, match="Invalid table"):
+            get_table_schema_trino(conn, "mydb", "users; DROP TABLE")
 
 
 # =============================================================================

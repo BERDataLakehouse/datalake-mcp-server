@@ -167,7 +167,7 @@ class AsyncQueryExecutor:
                 )
 
             # 4. Write result to S3 via boto3
-            result_json = json.dumps(response.result)
+            result_json = json.dumps(response.result, default=str)
             await asyncio.to_thread(
                 s3_client.upload_result, client, bucket, result_prefix, result_json
             )
