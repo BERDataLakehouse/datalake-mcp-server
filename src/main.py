@@ -5,6 +5,7 @@ Main application module for the Spark Manager API.
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request, Response, status
@@ -200,14 +201,16 @@ def create_application() -> FastAPI:
         "MCP server mounted with stateless HTTP transport (horizontal scaling enabled)"
     )
 
-    # Define startup and shutdown event handlers
-    async def startup_event():
+    # Lifespan context manager for startup/shutdown
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Startup
         logger.info("Starting application")
         await app_state.build_app(app)
         app.state.async_query_executor = AsyncQueryExecutor()
         logger.info("Application started")
-
-    async def shutdown_event():
+        yield
+        # Shutdown
         logger.info("Shutting down application")
         await app.state.async_query_executor.shutdown()
         await mcp_transport.shutdown()
@@ -219,7 +222,7 @@ def create_application() -> FastAPI:
     if settings.service_root_path:
         # Create a root FastAPI application to handle path mounting
         # This prevents the MCP client from incorrectly constructing URLs
-        root_app = FastAPI()
+        root_app = FastAPI(lifespan=lifespan)
 
         # Mount the main app at the specified root path (e.g., "/apis/mcp")
         # This creates the following URL structure:
@@ -242,15 +245,10 @@ def create_application() -> FastAPI:
         # 5. Tool calls are made to /apis/mcp/tools/call (correct path)
         root_app.mount(settings.service_root_path, app)
 
-        # Event handlers must be attached to the root app since it's what gets served
-        root_app.add_event_handler("startup", startup_event)
-        root_app.add_event_handler("shutdown", shutdown_event)
-
         return root_app
     else:
-        # No root path mounting needed - serve the app directly
-        app.add_event_handler("startup", startup_event)
-        app.add_event_handler("shutdown", shutdown_event)
+        # No root path mounting needed - attach lifespan to app directly
+        app.router.lifespan_context = lifespan
 
     return app
 
