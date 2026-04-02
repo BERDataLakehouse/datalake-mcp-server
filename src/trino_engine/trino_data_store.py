@@ -118,7 +118,7 @@ def get_db_structure_trino(
     auth_token: str | None = None,
     settings: BERDLSettings | None = None,
 ) -> dict[str, Any]:
-    """Get the structure of databases, filtered by user namespace by default."""
+    """Get the structure of databases, optionally filtered by user namespace."""
     if settings is None:
         settings = get_settings()
 
