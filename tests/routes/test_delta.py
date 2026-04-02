@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import _extract_token_from_request, _make_trino_ctx, router
+from src.routes.delta import _make_trino_ctx, router
 from src.service.dependencies import SparkContext, TrinoContext, get_spark_context, auth
 from src.service.models import QueryEngine
 from src.service.exceptions import (

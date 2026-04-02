@@ -95,7 +95,6 @@ class TestGetDatabasesTrino:
             get_databases_trino(conn, use_hms=False, settings=mock_settings)
 
 
-
 # =============================================================================
 # get_tables_trino Tests
 # =============================================================================
