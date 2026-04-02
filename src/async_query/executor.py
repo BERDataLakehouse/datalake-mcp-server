@@ -250,7 +250,10 @@ class AsyncQueryExecutor:
                 max_rows=MAX_ASYNC_QUERY_ROWS,
             )
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.warning(f"Error closing Trino connection for user {user}: {e}")
 
     async def shutdown(self) -> None:
         """

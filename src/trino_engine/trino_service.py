@@ -12,6 +12,8 @@ import logging
 import re
 from typing import Any
 
+import sqlparse
+from sqlparse import tokens as T
 import trino
 
 from src.cache.redis_cache import get_cached_value, set_cached_value
@@ -61,10 +63,18 @@ def _validate_trino_identifier(name: str, identifier_type: str = "identifier") -
 def _spark_sql_to_trino(sql: str) -> str:
     """Convert Spark SQL quoting/pagination to Trino dialect.
 
-    - Backtick identifiers → double-quote identifiers
+    - Backtick identifiers → double-quote identifiers (token-aware,
+      leaves string literals untouched)
     - ``LIMIT n OFFSET m`` → ``OFFSET m LIMIT n``
     """
-    sql = sql.replace("`", '"')
+    parsed = sqlparse.parse(sql)[0]
+    parts: list[str] = []
+    for token in parsed.flatten():
+        value = token.value
+        if token.ttype in (T.Name, T.Name.Placeholder) and "`" in value:
+            value = value.replace("`", '"')
+        parts.append(value)
+    sql = "".join(parts)
     sql = re.sub(
         r"\bLIMIT\s+(\d+)\s+OFFSET\s+(\d+)",
         r"OFFSET \2 LIMIT \1",
@@ -250,16 +260,28 @@ def query_via_trino(
         results = _cursor_to_dicts(cursor)
         logger.info(f"Trino query returned {len(results)} rows.")
 
-        # Always get accurate total_count via COUNT query
-        cached_count = _get_from_cache(count_namespace, count_cache_key)
-        if cached_count:
-            total_count = cached_count[0]["count"]
+        if len(results) < limit and len(results) > 0:
+            # Incomplete page with results — we know the exact total without
+            # an expensive COUNT scan (matches Spark implementation)
+            total_count = offset + len(results)
+            has_more = False
+        elif len(results) == 0 and offset == 0:
+            # Empty table / no matching rows
+            total_count = 0
+            has_more = False
         else:
-            count_query = f"SELECT COUNT(*) AS cnt FROM ({base_query}) AS subquery"
-            cursor.execute(count_query)
-            total_count = cursor.fetchone()[0]
-            _store_in_cache(count_namespace, count_cache_key, [{"count": total_count}])
-        has_more = (offset + len(results)) < total_count
+            # Full page or empty page with offset > 0 — need accurate count
+            cached_count = _get_from_cache(count_namespace, count_cache_key)
+            if cached_count:
+                total_count = cached_count[0]["count"]
+            else:
+                count_query = f"SELECT COUNT(*) AS cnt FROM ({base_query}) AS subquery"
+                cursor.execute(count_query)
+                total_count = cursor.fetchone()[0]
+                _store_in_cache(
+                    count_namespace, count_cache_key, [{"count": total_count}]
+                )
+            has_more = (offset + len(results)) < total_count
 
         pagination = PaginationInfo(
             limit=limit,

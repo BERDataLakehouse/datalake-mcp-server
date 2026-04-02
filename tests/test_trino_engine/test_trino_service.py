@@ -19,6 +19,7 @@ from src.service.models import TableQueryResponse, TableSelectResponse
 from src.trino_engine.trino_service import (
     _cursor_to_dicts,
     _generate_cache_key,
+    _spark_sql_to_trino,
     _store_in_cache,
     _validate_trino_identifier,
     count_via_trino,
@@ -109,6 +110,33 @@ class TestStoreInCache:
 
 
 # =============================================================================
+# _spark_sql_to_trino Tests
+# =============================================================================
+
+
+class TestSparkSqlToTrino:
+    """Tests for Spark SQL → Trino dialect conversion."""
+
+    def test_backtick_identifiers_converted(self):
+        result = _spark_sql_to_trino("SELECT * FROM `mydb`.`mytable`")
+        assert result == 'SELECT * FROM "mydb"."mytable"'
+
+    def test_backticks_in_string_literals_preserved(self):
+        sql = "SELECT * FROM `mydb`.`t` WHERE msg = 'use `id` here'"
+        result = _spark_sql_to_trino(sql)
+        assert '"mydb"."t"' in result
+        assert "'use `id` here'" in result
+
+    def test_limit_offset_order_swapped(self):
+        result = _spark_sql_to_trino("SELECT 1 LIMIT 10 OFFSET 5")
+        assert result == "SELECT 1 OFFSET 5 LIMIT 10"
+
+    def test_no_backticks_passthrough(self):
+        sql = 'SELECT id, name FROM "db"."tbl"'
+        assert _spark_sql_to_trino(sql) == sql
+
+
+# =============================================================================
 # _validate_trino_identifier Tests
 # =============================================================================
 
@@ -174,8 +202,7 @@ class TestQueryViaTrino:
         conn, cursor = mock_conn
         cursor.description = [("id",)]
         cursor.fetchall.return_value = [(1,)]
-        # COUNT query returns total_count=1
-        cursor.fetchone.return_value = (1,)
+        # len(results)=1 < limit=10 and results > 0 → shortcut, no COUNT query
 
         result = query_via_trino(conn, "SELECT id FROM t", limit=10, offset=0)
 
@@ -212,7 +239,6 @@ class TestQueryViaTrino:
         conn, cursor = mock_conn
         cursor.description = [("id",)]
         cursor.fetchall.return_value = [(1,)]
-        cursor.fetchone.return_value = (1,)
 
         query_via_trino(conn, "SELECT * FROM `mydb`.`mytable`", limit=10, offset=0)
 
