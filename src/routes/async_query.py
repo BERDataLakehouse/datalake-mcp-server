@@ -28,6 +28,7 @@ from src.service.dependencies import (
     get_spark_context,
     get_token_from_request,
     get_user_from_request,
+    resolve_engine,
 )
 from src.service.exceptions import (
     JobAccessDeniedError,
@@ -45,6 +46,7 @@ from src.service.models import (
     JobRecord,
     JobStatus,
     PaginationInfo,
+    QueryEngine,
     TableQueryResponse,
 )
 from src.settings import get_settings
@@ -148,6 +150,17 @@ async def submit_async_query(
     )
     await asyncio.to_thread(job_store.create_job, client, job)
 
+    # Resolve query engine (per-request override > global > default spark)
+    engine = resolve_engine(request.engine)
+
+    trino_settings = None
+    if engine == QueryEngine.TRINO:
+        trino_settings = {
+            "TRINO_HOST": settings.TRINO_HOST,
+            "TRINO_PORT": settings.TRINO_PORT,
+            "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        }
+
     # Submit to background executor
     executor = _get_executor(http_request)
     await executor.submit_query(
@@ -161,9 +174,14 @@ async def submit_async_query(
         minio_access_key=minio_access_key,
         minio_secret_key=minio_secret_key,
         minio_secure=settings.MINIO_SECURE,
+        engine=engine,
+        auth_token=ctx.auth_token,
+        trino_settings=trino_settings,
     )
 
-    logger.info(f"Async query submitted: job_id={job_id} user={username}")
+    logger.info(
+        f"Async query submitted: job_id={job_id} user={username} engine={engine.value}"
+    )
     return AsyncQuerySubmitResponse(job_id=job_id)
 
 

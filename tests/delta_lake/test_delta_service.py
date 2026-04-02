@@ -1589,3 +1589,279 @@ class TestSelectFromDeltaTableErrors:
                         delta_service.select_from_delta_table(
                             spark, request, use_cache=False
                         )
+
+
+# =============================================================================
+# Tests for _check_exists happy path (line 183)
+# =============================================================================
+
+
+class TestCheckExists:
+    """Tests for _check_exists function."""
+
+    def test_returns_true_when_both_exist(self):
+        """Test that _check_exists returns True when database and table exist (line 183)."""
+        with patch("src.delta_lake.delta_service.database_exists", return_value=True):
+            with patch("src.delta_lake.delta_service.table_exists", return_value=True):
+                result = delta_service._check_exists("mydb", "mytable")
+        assert result is True
+
+
+# =============================================================================
+# Tests for _store_in_cache (line 227)
+# =============================================================================
+
+
+# =============================================================================
+# Tests for sample_delta_table cache store (line 356)
+# =============================================================================
+
+
+class TestSampleDeltaTableCacheStore:
+    """Tests for sample_delta_table cache storing."""
+
+    def test_sample_stores_result_in_cache(self, mock_spark_session):
+        """Test that sample_delta_table calls _store_in_cache (line 356)."""
+        test_data = [{"id": 1}]
+        spark = mock_spark_session(table_results=test_data)
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service._store_in_cache"
+                ) as mock_store:
+                    with patch(
+                        "src.delta_lake.delta_service.run_with_timeout",
+                        side_effect=lambda func, **kwargs: func(),
+                    ):
+                        delta_service.sample_delta_table(
+                            spark, "testdb", "testtable", limit=10, use_cache=True
+                        )
+
+        mock_store.assert_called_once()
+
+
+# =============================================================================
+# Tests for _execute_non_paginatable_query (lines 392-444, 489)
+# =============================================================================
+
+
+class TestExecuteNonPaginatableQuery:
+    """Tests for _execute_non_paginatable_query function."""
+
+    def test_describe_query_dispatched(self, mock_spark_session):
+        """Test that DESCRIBE queries dispatch to _execute_non_paginatable_query (line 489)."""
+        spark = mock_spark_session()
+        describe_results = [{"col_name": "id", "data_type": "int"}]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache"):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    return_value=describe_results,
+                ):
+                    result = delta_service.query_delta_table(
+                        spark, "DESCRIBE mytable", use_cache=False
+                    )
+
+        assert result.result == describe_results
+        assert result.pagination.has_more is False
+        assert result.pagination.total_count == 1
+
+    def test_show_tables_query(self, mock_spark_session):
+        """Test that SHOW queries use non-paginatable path."""
+        spark = mock_spark_session()
+        show_results = [{"tableName": "t1"}, {"tableName": "t2"}]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache"):
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    return_value=show_results,
+                ):
+                    result = delta_service.query_delta_table(
+                        spark, "SHOW TABLES", use_cache=False
+                    )
+
+        assert len(result.result) == 2
+        assert result.pagination.total_count == 2
+
+    def test_non_paginatable_cache_hit(self, mock_spark_session):
+        """Test that _execute_non_paginatable_query uses cache (lines 398-405)."""
+        spark = mock_spark_session()
+        cached = [
+            {
+                "result": [{"col_name": "id"}],
+                "pagination": {
+                    "limit": 1,
+                    "offset": 0,
+                    "total_count": 1,
+                    "has_more": False,
+                },
+            }
+        ]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=cached):
+            result = delta_service.query_delta_table(
+                spark, "DESCRIBE mytable", use_cache=True
+            )
+
+        assert result.result == [{"col_name": "id"}]
+        spark.sql.assert_not_called()
+
+    def test_non_paginatable_stores_in_cache(self, mock_spark_session):
+        """Test that _execute_non_paginatable_query stores result in cache (lines 429-436)."""
+        spark = mock_spark_session()
+        results = [{"col_name": "id"}]
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache") as mock_store:
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout",
+                    return_value=results,
+                ):
+                    delta_service.query_delta_table(
+                        spark, "DESCRIBE mytable", use_cache=True
+                    )
+
+        mock_store.assert_called_once()
+
+    def test_non_paginatable_timeout_reraises(self, mock_spark_session):
+        """Test that timeout in _execute_non_paginatable_query re-raises (line 440-441)."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch(
+                "src.delta_lake.delta_service.run_with_timeout",
+                side_effect=SparkTimeoutError(operation="metadata_query", timeout=30),
+            ):
+                with pytest.raises(SparkTimeoutError):
+                    delta_service.query_delta_table(
+                        spark, "DESCRIBE mytable", use_cache=False
+                    )
+
+    def test_non_paginatable_generic_error(self, mock_spark_session):
+        """Test that generic errors raise SparkOperationError (lines 442-444)."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch(
+                "src.delta_lake.delta_service.run_with_timeout",
+                side_effect=RuntimeError("unexpected"),
+            ):
+                with pytest.raises(
+                    SparkOperationError, match="Failed to execute metadata query"
+                ):
+                    delta_service.query_delta_table(
+                        spark, "DESCRIBE mytable", use_cache=False
+                    )
+
+
+# =============================================================================
+# Tests for query_delta_table count cache store (line 593)
+# =============================================================================
+
+
+class TestQueryDeltaTableCountCacheStore:
+    """Tests for query_delta_table count cache storing."""
+
+    def test_query_stores_count_in_cache(self, mock_spark_session):
+        """Test that query_delta_table stores count in cache (line 593)."""
+        spark = mock_spark_session()
+
+        data_results = [{"id": i} for i in range(10)]
+        count_row = MagicMock()
+        count_row.__getitem__ = lambda self, key: 250 if key == "cnt" else None
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch("src.delta_lake.delta_service._store_in_cache") as mock_store:
+                with patch(
+                    "src.delta_lake.delta_service.run_with_timeout"
+                ) as mock_timeout:
+                    mock_timeout.side_effect = [data_results, [count_row]]
+                    delta_service.query_delta_table(
+                        spark,
+                        "SELECT * FROM users",
+                        limit=10,
+                        use_cache=True,
+                    )
+
+        # Should be called twice: once for count cache, once for data cache
+        assert mock_store.call_count == 2
+
+
+# =============================================================================
+# Tests for query_delta_table generic exception (line 623)
+# =============================================================================
+
+
+class TestQueryDeltaTableGenericException:
+    """Tests for query_delta_table generic exception handling."""
+
+    def test_generic_exception_raises_spark_operation_error(self, mock_spark_session):
+        """Test that a generic exception raises SparkOperationError (lines 625-626)."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch(
+                "src.delta_lake.delta_service.run_with_timeout",
+                side_effect=RuntimeError("something broke"),
+            ):
+                with pytest.raises(
+                    SparkOperationError, match="Failed to execute query"
+                ):
+                    delta_service.query_delta_table(
+                        spark, "SELECT * FROM users", use_cache=False
+                    )
+
+    def test_spark_query_error_reraises(self, mock_spark_session):
+        """Test that SparkQueryError from inside try block re-raises (line 623)."""
+        spark = mock_spark_session()
+
+        with patch("src.delta_lake.delta_service._get_from_cache", return_value=None):
+            with patch(
+                "src.delta_lake.delta_service.run_with_timeout",
+                side_effect=SparkQueryError("bad query syntax"),
+            ):
+                with pytest.raises(SparkQueryError, match="bad query syntax"):
+                    delta_service.query_delta_table(
+                        spark, "SELECT * FROM users", use_cache=False
+                    )
+
+
+# =============================================================================
+# Tests for select_from_delta_table cache store (lines 1004-1010)
+# =============================================================================
+
+
+class TestSelectFromDeltaTableCacheStore:
+    """Tests for select_from_delta_table cache storing."""
+
+    def test_select_stores_result_in_cache(self, mock_spark_session):
+        """Test that select_from_delta_table calls _store_in_cache (lines 1004-1010)."""
+        spark = mock_spark_session()
+
+        count_row = MagicMock()
+        count_row.__getitem__ = lambda self, key: 5 if key == "cnt" else None
+
+        data_results = [{"id": 1}, {"id": 2}]
+
+        with patch("src.delta_lake.delta_service._check_exists", return_value=True):
+            with patch(
+                "src.delta_lake.delta_service._get_from_cache", return_value=None
+            ):
+                with patch(
+                    "src.delta_lake.delta_service._store_in_cache"
+                ) as mock_store:
+                    with patch(
+                        "src.delta_lake.delta_service.run_with_timeout"
+                    ) as mock_timeout:
+                        mock_timeout.side_effect = [[count_row], data_results]
+                        request = TableSelectRequest(database="db", table="t")
+                        delta_service.select_from_delta_table(
+                            spark, request, use_cache=True
+                        )
+
+        mock_store.assert_called_once()

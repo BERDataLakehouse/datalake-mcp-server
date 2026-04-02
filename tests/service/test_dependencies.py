@@ -20,6 +20,7 @@ import pytest
 
 from src.service.dependencies import (
     SparkContext,
+    TrinoContext,
     fetch_user_minio_credentials,
     get_token_from_request,
     get_user_from_request,
@@ -27,10 +28,12 @@ from src.service.dependencies import (
     is_spark_connect_reachable,
     get_spark_context,
     get_spark_session,
+    resolve_engine,
     sanitize_k8s_name,
     DEFAULT_SPARK_POOL,
     SPARK_CONNECT_PORT,
 )
+from src.service.models import QueryEngine
 
 
 # =============================================================================
@@ -1656,3 +1659,69 @@ class TestIsSparkConnectReachableGrpcError:
 
         assert result is False
         mock_channel.close.assert_called_once()
+
+
+# =============================================================================
+# Test resolve_engine
+# =============================================================================
+
+
+class TestResolveEngine:
+    """Tests for the resolve_engine function."""
+
+    def test_default_is_spark(self):
+        with patch.dict("os.environ", {}, clear=True):
+            assert resolve_engine() == QueryEngine.SPARK
+
+    def test_env_var_trino(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "trino"}):
+            assert resolve_engine() == QueryEngine.TRINO
+
+    def test_env_var_spark(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "spark"}):
+            assert resolve_engine() == QueryEngine.SPARK
+
+    def test_env_var_case_insensitive(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "TRINO"}):
+            assert resolve_engine() == QueryEngine.TRINO
+
+    def test_per_request_override_takes_precedence(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "spark"}):
+            assert resolve_engine(QueryEngine.TRINO) == QueryEngine.TRINO
+
+    def test_per_request_none_falls_through(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "trino"}):
+            assert resolve_engine(None) == QueryEngine.TRINO
+
+    def test_invalid_env_defaults_to_spark(self):
+        with patch.dict("os.environ", {"QUERY_ENGINE": "invalid"}):
+            assert resolve_engine() == QueryEngine.SPARK
+
+
+# =============================================================================
+# Test TrinoContext
+# =============================================================================
+
+
+class TestTrinoContextDataclass:
+    """Tests for the TrinoContext dataclass."""
+
+    def test_required_fields(self):
+        conn = MagicMock()
+        ctx = TrinoContext(connection=conn)
+        assert ctx.connection is conn
+        assert ctx.username == ""
+        assert ctx.auth_token is None
+        assert ctx.settings_dict == {}
+
+    def test_all_fields(self):
+        conn = MagicMock()
+        ctx = TrinoContext(
+            connection=conn,
+            username="alice",
+            auth_token="tok",
+            settings_dict={"TRINO_HOST": "trino"},
+        )
+        assert ctx.username == "alice"
+        assert ctx.auth_token == "tok"
+        assert ctx.settings_dict == {"TRINO_HOST": "trino"}

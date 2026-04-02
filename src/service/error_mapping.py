@@ -24,7 +24,6 @@ from src.service.exceptions import (
     JobFailedError,
     JobNotFoundError,
     JobNotReadyError,
-    TooManyJobsError,
     MCPServerError,
     MissingMFAError,
     MissingRoleError,
@@ -34,6 +33,10 @@ from src.service.exceptions import (
     SparkQueryError,
     SparkSessionError,
     SparkTimeoutError,
+    TooManyJobsError,
+    TrinoConnectionError,
+    TrinoOperationError,
+    TrinoQueryError,
 )
 
 _H400 = status.HTTP_400_BAD_REQUEST
@@ -85,6 +88,10 @@ _ERR_MAP = {
     JobAccessDeniedError: ErrorMapping(ErrorType.JOB_ACCESS_DENIED, _H403),
     TooManyJobsError: ErrorMapping(ErrorType.TOO_MANY_JOBS, _H429),
     AsyncQueryError: ErrorMapping(ErrorType.ASYNC_QUERY_ERROR, _H400),
+    # Trino errors
+    TrinoConnectionError: ErrorMapping(ErrorType.TRINO_CONNECTION_ERROR, _H503),
+    TrinoQueryError: ErrorMapping(ErrorType.TRINO_QUERY_ERROR, _H400),
+    TrinoOperationError: ErrorMapping(ErrorType.TRINO_OPERATION_ERROR, _H503),
     # Base error fallback
     MCPServerError: ErrorMapping(None, status.HTTP_500_INTERNAL_SERVER_ERROR),
 }

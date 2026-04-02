@@ -15,8 +15,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import _extract_token_from_request, router
-from src.service.dependencies import SparkContext, get_spark_context, auth
+from src.routes.delta import _extract_token_from_request, _make_trino_ctx, router
+from src.service.dependencies import SparkContext, TrinoContext, get_spark_context, auth
+from src.service.models import QueryEngine
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
     DeltaTableNotFoundError,
@@ -447,6 +448,27 @@ class TestGetTableSchemaEndpoint:
         data = response.json()
         assert "columns" in data
         assert data["columns"] == ["id", "name", "email"]
+
+
+class TestGetDbStructureEndpoint:
+    """Tests for the /delta/databases/structure endpoint (default Spark path)."""
+
+    def test_get_db_structure_success(self, delta_client):
+        """Test successful db structure retrieval via default Spark path (lines 280-281)."""
+        client, spark, user = delta_client
+
+        with patch(
+            "src.routes.delta.data_store.get_db_structure",
+            return_value={"db1": ["t1", "t2"]},
+        ):
+            response = client.post(
+                "/delta/databases/structure",
+                json={"with_schema": False, "use_hms": True},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["structure"] == {"db1": ["t1", "t2"]}
 
 
 class TestCountTableEndpoint:
@@ -1226,3 +1248,286 @@ class TestStandaloneSubprocessDispatch:
         assert response.status_code == 200
         assert response.json()["data"] == [{"id": 1}]
         mock_run.assert_called_once()
+
+
+# =============================================================================
+# Trino Engine Dispatch Tests
+# =============================================================================
+
+
+class TestTrinoEngineDispatch:
+    """Tests for routes when engine resolves to Trino."""
+
+    @pytest.fixture
+    def trino_app(self, mock_kbase_user):
+        """Create a FastAPI app with mocked dependencies for Trino mode."""
+        app = FastAPI()
+        app.include_router(router)
+
+        user = mock_kbase_user()
+
+        # SparkContext is still created by Depends but won't be used
+        def mock_get_spark_ctx():
+            ctx = SparkContext(
+                spark=MagicMock(),
+                is_standalone_subprocess=False,
+                settings_dict={},
+                app_name="test_app",
+                username=user.user,
+            )
+            yield ctx
+
+        def mock_auth():
+            return user
+
+        app.dependency_overrides[get_spark_context] = mock_get_spark_ctx
+        app.dependency_overrides[auth] = mock_auth
+
+        return app, user
+
+    @pytest.fixture
+    def trino_client(self, trino_app):
+        app, user = trino_app
+        return TestClient(app), user
+
+    def _patch_trino_ctx(self):
+        """Return a patch for _make_trino_ctx that yields a mock TrinoContext."""
+        mock_conn = MagicMock()
+        mock_ctx = TrinoContext(
+            connection=mock_conn,
+            username="testuser",
+            auth_token="tok",
+            settings_dict={},
+        )
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_make_trino_ctx(request):
+            yield mock_ctx
+
+        return patch("src.routes.delta._make_trino_ctx", fake_make_trino_ctx), mock_conn
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_list_databases_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_data_store.get_databases_trino",
+                return_value=["db1"],
+            ) as mock_fn,
+        ):
+            response = client.post(
+                "/delta/databases/list",
+                json={"use_hms": True, "filter_by_namespace": False},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["databases"] == ["db1"]
+        mock_fn.assert_called_once()
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_list_databases_trino_with_namespace_filter(
+        self, mock_engine, trino_client
+    ):
+        """Lines 116-118: namespace filter extracts auth token."""
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_data_store.get_databases_trino",
+                return_value=["u_test__db"],
+            ),
+        ):
+            response = client.post(
+                "/delta/databases/list",
+                json={"use_hms": True, "filter_by_namespace": True},
+                headers={"Authorization": "Bearer test_token_123"},
+            )
+
+        assert response.status_code == 200
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_list_tables_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_data_store.get_tables_trino",
+                return_value=["t1", "t2"],
+            ),
+        ):
+            response = client.post(
+                "/delta/databases/tables/list",
+                json={"database": "mydb", "use_hms": True},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["tables"] == ["t1", "t2"]
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_get_table_schema_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_data_store.get_table_schema_trino",
+                return_value=["id", "name"],
+            ),
+        ):
+            response = client.post(
+                "/delta/databases/tables/schema",
+                json={"database": "mydb", "table": "users"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["columns"] == ["id", "name"]
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_get_db_structure_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_data_store.get_db_structure_trino",
+                return_value={"db1": ["t1"]},
+            ),
+        ):
+            response = client.post(
+                "/delta/databases/structure",
+                json={"with_schema": False, "use_hms": True},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["structure"] == {"db1": ["t1"]}
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_count_table_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_service.count_via_trino",
+                return_value=42,
+            ),
+        ):
+            response = client.post(
+                "/delta/tables/count",
+                json={"database": "mydb", "table": "users"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["count"] == 42
+
+    @patch("src.routes.delta.resolve_engine", return_value=QueryEngine.TRINO)
+    def test_sample_table_trino(self, mock_engine, trino_client):
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_service.sample_via_trino",
+                return_value=[{"id": 1}],
+            ),
+        ):
+            response = client.post(
+                "/delta/tables/sample",
+                json={"database": "mydb", "table": "users", "limit": 5},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["sample"] == [{"id": 1}]
+
+    def test_query_table_trino(self, trino_client):
+        """Per-request engine override via request.engine field."""
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        mock_response = TableQueryResponse(
+            result=[{"id": 1}],
+            pagination=PaginationInfo(
+                limit=100, offset=0, total_count=1, has_more=False
+            ),
+        )
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.execute_query_trino",
+                return_value=mock_response,
+            ),
+        ):
+            response = client.post(
+                "/delta/tables/query",
+                json={"query": "SELECT 1", "engine": "trino"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["result"] == [{"id": 1}]
+
+    def test_select_table_trino(self, trino_client):
+        """Per-request engine override via request.engine field."""
+        client, user = trino_client
+        trino_patch, mock_conn = self._patch_trino_ctx()
+
+        mock_response = TableSelectResponse(
+            data=[{"id": 1}],
+            pagination=PaginationInfo(
+                limit=100, offset=0, total_count=1, has_more=False
+            ),
+        )
+
+        with (
+            trino_patch,
+            patch(
+                "src.routes.delta.trino_service.select_via_trino",
+                return_value=mock_response,
+            ),
+        ):
+            response = client.post(
+                "/delta/tables/select",
+                json={"database": "mydb", "table": "users", "engine": "trino"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == [{"id": 1}]
+
+
+# =============================================================================
+# _make_trino_ctx Tests
+# =============================================================================
+
+
+class TestMakeTrinoCtx:
+    """Tests for the _make_trino_ctx context manager."""
+
+    @patch("src.routes.delta.get_trino_context")
+    @patch("src.routes.delta.get_settings")
+    def test_yields_and_cleans_up(self, mock_settings, mock_get_trino_ctx):
+        """Lines 83-92: context manager yields TrinoContext and exhausts generator."""
+        mock_ctx = MagicMock()
+
+        def fake_generator(request, settings):
+            yield mock_ctx
+
+        mock_get_trino_ctx.side_effect = fake_generator
+        mock_request = MagicMock()
+
+        with _make_trino_ctx(mock_request) as ctx:
+            assert ctx is mock_ctx
+
+        mock_get_trino_ctx.assert_called_once()

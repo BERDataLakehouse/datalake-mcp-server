@@ -103,6 +103,14 @@ class BERDLSettings(BaseSettings):
         description="Data governance API endpoint",
     )
 
+    # Trino configuration
+    TRINO_HOST: str = Field(default="trino", description="Trino coordinator hostname")
+    TRINO_PORT: int = Field(default=8080, description="Trino coordinator port")
+    QUERY_ENGINE: str = Field(
+        default="spark",
+        description="Default query engine: spark or trino",
+    )
+
     # Optional: Pod IP for legacy mode (not used in MCP server)
     BERDL_POD_IP: str | None = Field(
         default=None, description="Pod IP for legacy Spark mode"

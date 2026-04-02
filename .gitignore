@@ -10,3 +10,4 @@ test/test_temp/
 cdr/cdm/jupyter/
 src/datalake_mcp_server.egg-info/
 kubernetes/
+.env

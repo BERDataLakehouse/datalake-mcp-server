@@ -19,6 +19,7 @@ from src.service.dependencies import SparkContext
 from src.service.models import (
     JobStatus,
     PaginationInfo,
+    QueryEngine,
     TableQueryResponse,
 )
 from src.service.query_executor import execute_query
@@ -300,6 +301,165 @@ class TestExecuteQuery:
             await executor._execute_query(**submit_kwargs)
 
             assert "job-1" not in executor._active_tasks
+
+
+# =============================================================================
+# Trino Engine Tests
+# =============================================================================
+
+
+class TestTrinoEngineExecution:
+    """Tests for Trino engine execution in background tasks."""
+
+    @pytest.fixture
+    def trino_submit_kwargs(self, ctx):
+        """Default kwargs for submit_query with Trino engine."""
+        return dict(
+            job_id="job-trino-1",
+            user="testuser",
+            query="SELECT 1",
+            limit=1000,
+            offset=0,
+            ctx=ctx,
+            minio_endpoint="localhost:9002",
+            minio_access_key="key",
+            minio_secret_key="secret",
+            minio_secure=False,
+            engine=QueryEngine.TRINO,
+            auth_token="test-token",
+            trino_settings={
+                "TRINO_HOST": "trino",
+                "TRINO_PORT": 8080,
+                "BERDL_HIVE_METASTORE_URI": "thrift://hms:9083",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_trino_execution_creates_connection(
+        self, executor, trino_submit_kwargs, mock_query_response
+    ):
+        """Trino execution creates a connection and closes it."""
+        mock_conn = MagicMock()
+
+        with (
+            patch(
+                "src.async_query.executor.create_trino_connection",
+                return_value=mock_conn,
+            ) as mock_create,
+            patch(
+                "src.async_query.executor.execute_query_trino",
+                return_value=mock_query_response,
+            ),
+            patch("src.async_query.executor.job_store"),
+            patch("src.async_query.executor.s3_client") as mock_s3,
+        ):
+            mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+            mock_s3.build_result_path.return_value = "prefix/"
+            mock_s3.build_query_result_root_path.return_value = "root/"
+            mock_s3.create_s3_client.return_value = MagicMock()
+
+            await executor._execute_query(**trino_submit_kwargs)
+
+            mock_create.assert_called_once()
+            mock_conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trino_execution_succeeds(
+        self, executor, trino_submit_kwargs, mock_query_response
+    ):
+        """Successful Trino execution updates status to SUCCEEDED."""
+        with (
+            patch(
+                "src.async_query.executor.create_trino_connection",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "src.async_query.executor.execute_query_trino",
+                return_value=mock_query_response,
+            ),
+            patch("src.async_query.executor.job_store") as mock_job_store,
+            patch("src.async_query.executor.s3_client") as mock_s3,
+        ):
+            mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+            mock_s3.build_result_path.return_value = "prefix/"
+            mock_s3.build_query_result_root_path.return_value = "root/"
+            mock_s3.create_s3_client.return_value = MagicMock()
+
+            await executor._execute_query(**trino_submit_kwargs)
+
+            calls = mock_job_store.update_job_status.call_args_list
+            assert calls[-1].args[2] == JobStatus.SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_trino_missing_settings_fails(self, executor, trino_submit_kwargs):
+        """Missing trino_settings raises ValueError and marks job FAILED."""
+        trino_submit_kwargs["trino_settings"] = None
+
+        with (
+            patch("src.async_query.executor.job_store") as mock_job_store,
+            patch("src.async_query.executor.s3_client") as mock_s3,
+        ):
+            mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+            mock_s3.create_s3_client.return_value = MagicMock()
+
+            await executor._execute_query(**trino_submit_kwargs)
+
+            calls = mock_job_store.update_job_status.call_args_list
+            assert calls[-1].args[2] == JobStatus.FAILED
+            assert "trino_settings" in calls[-1].kwargs.get("error_message", "")
+
+    @pytest.mark.asyncio
+    async def test_trino_connection_closed_on_error(
+        self, executor, trino_submit_kwargs
+    ):
+        """Trino connection is closed even when query execution fails."""
+        mock_conn = MagicMock()
+
+        with (
+            patch(
+                "src.async_query.executor.create_trino_connection",
+                return_value=mock_conn,
+            ),
+            patch(
+                "src.async_query.executor.execute_query_trino",
+                side_effect=RuntimeError("query failed"),
+            ),
+            patch("src.async_query.executor.job_store"),
+            patch("src.async_query.executor.s3_client") as mock_s3,
+        ):
+            mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+            mock_s3.build_result_path.return_value = "prefix/"
+            mock_s3.build_query_result_root_path.return_value = "root/"
+            mock_s3.create_s3_client.return_value = MagicMock()
+
+            await executor._execute_query(**trino_submit_kwargs)
+
+            mock_conn.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_spark_engine_does_not_create_trino_connection(
+        self, executor, submit_kwargs, mock_query_response
+    ):
+        """Spark engine does not create a Trino connection."""
+        with (
+            patch(
+                "src.async_query.executor.execute_query",
+                return_value=mock_query_response,
+            ),
+            patch(
+                "src.async_query.executor.create_trino_connection",
+            ) as mock_create,
+            patch("src.async_query.executor.job_store"),
+            patch("src.async_query.executor.s3_client") as mock_s3,
+        ):
+            mock_s3.ASYNC_QUERY_RESULT_BUCKET = "cdm-lake"
+            mock_s3.build_result_path.return_value = "prefix/"
+            mock_s3.build_query_result_root_path.return_value = "root/"
+            mock_s3.create_s3_client.return_value = MagicMock()
+
+            await executor._execute_query(**submit_kwargs)
+
+            mock_create.assert_not_called()
 
 
 # =============================================================================
