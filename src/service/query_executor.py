@@ -17,12 +17,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import trino
+
 from src.delta_lake import delta_service
 from src.delta_lake.delta_service import MAX_QUERY_ROWS
 from src.service.dependencies import SparkContext
 from src.service.models import PaginationInfo, TableQueryResponse
 from src.service.spark_session_pool import run_in_spark_process
 from src.service.standalone_operations import query_table_subprocess
+from src.trino_engine import trino_service
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +86,26 @@ def execute_query(
             username=username,
             max_rows=max_rows,
         )
+
+
+def execute_query_trino(
+    conn: trino.dbapi.Connection,
+    query: str,
+    limit: int,
+    offset: int,
+    username: str | None = None,
+    max_rows: int = MAX_QUERY_ROWS,
+) -> TableQueryResponse:
+    """
+    Execute a SQL query via Trino.
+
+    Blocking function — the async executor wraps it in asyncio.to_thread.
+    """
+    return trino_service.query_via_trino(
+        conn=conn,
+        query=query,
+        limit=limit,
+        offset=offset,
+        username=username,
+        max_rows=max_rows,
+    )

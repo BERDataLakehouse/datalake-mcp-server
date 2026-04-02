@@ -13,7 +13,7 @@ import pytest
 
 from src.service.dependencies import SparkContext
 from src.service.models import PaginationInfo, TableQueryResponse
-from src.service.query_executor import execute_query
+from src.service.query_executor import execute_query, execute_query_trino
 
 
 # =============================================================================
@@ -231,3 +231,58 @@ class TestConnectMode:
             execute_query(connect_ctx, "SELECT 1", 100, 0, "testuser")
 
             mock_run.assert_not_called()
+
+
+# =============================================================================
+# Trino Mode Tests
+# =============================================================================
+
+
+class TestTrinoMode:
+    """Tests for Trino execution via execute_query_trino."""
+
+    def test_delegates_to_trino_service(self):
+        """execute_query_trino delegates to trino_service.query_via_trino."""
+        mock_conn = MagicMock()
+        mock_response = TableQueryResponse(
+            result=[{"id": 1}],
+            pagination=PaginationInfo(
+                limit=100, offset=0, total_count=1, has_more=False
+            ),
+        )
+
+        with patch(
+            "src.service.query_executor.trino_service.query_via_trino",
+            return_value=mock_response,
+        ) as mock_query:
+            response = execute_query_trino(mock_conn, "SELECT 1", 100, 0, "testuser")
+
+            mock_query.assert_called_once_with(
+                conn=mock_conn,
+                query="SELECT 1",
+                limit=100,
+                offset=0,
+                username="testuser",
+                max_rows=1000,
+            )
+            assert response.result == [{"id": 1}]
+
+    def test_max_rows_passed_through(self):
+        """max_rows parameter is forwarded."""
+        mock_conn = MagicMock()
+        mock_response = TableQueryResponse(
+            result=[],
+            pagination=PaginationInfo(
+                limit=100, offset=0, total_count=0, has_more=False
+            ),
+        )
+
+        with patch(
+            "src.service.query_executor.trino_service.query_via_trino",
+            return_value=mock_response,
+        ) as mock_query:
+            execute_query_trino(
+                mock_conn, "SELECT 1", 100, 0, "testuser", max_rows=5000
+            )
+
+            assert mock_query.call_args.kwargs["max_rows"] == 5000

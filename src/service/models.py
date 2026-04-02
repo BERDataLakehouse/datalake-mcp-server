@@ -10,6 +10,15 @@ from typing import Annotated, Any, Dict, List, Literal
 from pydantic import BaseModel, Field
 
 MAX_ASYNC_QUERY_ROWS = int(os.getenv("ASYNC_QUERY_MAX_ROWS", "5000"))
+
+
+class QueryEngine(str, Enum):
+    """Query engine to use for execution."""
+
+    SPARK = "spark"
+    TRINO = "trino"
+
+
 MAX_CONCURRENT_ASYNC_JOBS_PER_USER = int(
     os.getenv("MAX_CONCURRENT_ASYNC_JOBS_PER_USER", "10")
 )
@@ -148,6 +157,15 @@ class TableQueryRequest(BaseModel):
             ge=0,
         ),
     ] = 0
+    engine: Annotated[
+        QueryEngine | None,
+        Field(
+            description=(
+                "Query engine to use. Overrides the global QUERY_ENGINE setting. "
+                "If not specified, uses the QUERY_ENGINE env var (default: spark)."
+            ),
+        ),
+    ] = None
 
 
 class TableQueryResponse(BaseModel):
@@ -358,6 +376,15 @@ class TableSelectRequest(BaseModel):
         int,
         Field(description="Number of rows to skip for pagination", ge=0),
     ] = 0
+    engine: Annotated[
+        QueryEngine | None,
+        Field(
+            description=(
+                "Query engine to use. Overrides the global QUERY_ENGINE setting. "
+                "If not specified, uses the QUERY_ENGINE env var (default: spark)."
+            ),
+        ),
+    ] = None
 
 
 class TableSelectResponse(BaseModel):
@@ -441,6 +468,15 @@ class AsyncQuerySubmitRequest(BaseModel):
             ge=0,
         ),
     ] = 0
+    engine: Annotated[
+        QueryEngine | None,
+        Field(
+            description=(
+                "Query engine to use. Overrides the global QUERY_ENGINE setting. "
+                "If not specified, uses the QUERY_ENGINE env var (default: spark)."
+            ),
+        ),
+    ] = None
 
 
 class AsyncQuerySubmitResponse(BaseModel):
