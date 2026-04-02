@@ -1604,7 +1604,9 @@ class TestCheckExists:
         mock_spark = MagicMock()
         with patch("src.delta_lake.delta_service.database_exists", return_value=True):
             with patch("src.delta_lake.delta_service.table_exists", return_value=True):
-                result = delta_service._check_exists("mydb", "mytable", spark=mock_spark)
+                result = delta_service._check_exists(
+                    "mydb", "mytable", spark=mock_spark
+                )
         assert result is True
 
 
