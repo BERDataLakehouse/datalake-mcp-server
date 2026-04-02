@@ -33,6 +33,23 @@ logger = logging.getLogger(__name__)
 _SCHEME = "Bearer"
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # In root_path mode, lifespan runs on root_app but must operate on the
+    # inner service app (stored on root_app.state._service_app).
+    service_app = getattr(app.state, "_service_app", app)
+    logger.info("Starting application")
+    await app_state.build_app(service_app)
+    service_app.state.async_query_executor = AsyncQueryExecutor()
+    logger.info("Application started")
+    yield
+    logger.info("Shutting down application")
+    await service_app.state.async_query_executor.shutdown()
+    await service_app.state.mcp_transport.shutdown()
+    await app_state.destroy_app_state(service_app)
+    logger.info("Application shut down")
+
+
 class RequestTimeoutMiddleware(BaseHTTPMiddleware):
     """
     Middleware to enforce HTTP request timeouts.
@@ -197,25 +214,10 @@ def create_application() -> FastAPI:
     )
     # Use stateless HTTP transport instead of default SSE for horizontal scaling
     mcp_transport = mount_stateless_mcp(mcp)
+    app.state.mcp_transport = mcp_transport
     logger.info(
         "MCP server mounted with stateless HTTP transport (horizontal scaling enabled)"
     )
-
-    # Lifespan context manager for startup/shutdown
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        # Startup
-        logger.info("Starting application")
-        await app_state.build_app(app)
-        app.state.async_query_executor = AsyncQueryExecutor()
-        logger.info("Application started")
-        yield
-        # Shutdown
-        logger.info("Shutting down application")
-        await app.state.async_query_executor.shutdown()
-        await mcp_transport.shutdown()
-        await app_state.destroy_app_state(app)
-        logger.info("Application shut down")
 
     # Handle service root path mounting for proper URL routing
     # This is critical for preventing double path prefixes in MCP client requests
@@ -223,6 +225,7 @@ def create_application() -> FastAPI:
         # Create a root FastAPI application to handle path mounting
         # This prevents the MCP client from incorrectly constructing URLs
         root_app = FastAPI(lifespan=lifespan)
+        root_app.state._service_app = app
 
         # Mount the main app at the specified root path (e.g., "/apis/mcp")
         # This creates the following URL structure:
@@ -247,7 +250,8 @@ def create_application() -> FastAPI:
 
         return root_app
     else:
-        # No root path mounting needed - attach lifespan to app directly
+        # Can't use FastAPI(lifespan=) constructor because lifespan depends on
+        # mcp_transport which requires app to exist first
         app.router.lifespan_context = lifespan
 
     return app
