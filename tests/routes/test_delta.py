@@ -15,8 +15,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import _extract_token_from_request, _make_trino_ctx, router
+from src.routes.delta import _make_trino_ctx, router
+from src.service.dependencies import get_token_from_request
 from src.service.dependencies import SparkContext, TrinoContext, get_spark_context, auth
+from src.service.exception_handlers import universal_error_handler
 from src.service.models import QueryEngine
 from src.service.exceptions import (
     DeltaDatabaseNotFoundError,
@@ -463,12 +465,53 @@ class TestGetDbStructureEndpoint:
         ):
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={
+                    "with_schema": False,
+                    "use_hms": True,
+                    "filter_by_namespace": False,
+                },
             )
 
         assert response.status_code == 200
         data = response.json()
         assert data["structure"] == {"db1": ["t1", "t2"]}
+
+    def test_get_db_structure_namespace_filter_missing_token(self, mock_app):
+        """Test that filter_by_namespace=True without Authorization header returns 401."""
+        app, spark, user = mock_app
+        app.add_exception_handler(Exception, universal_error_handler)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/delta/databases/structure",
+            json={"with_schema": False, "use_hms": True, "filter_by_namespace": True},
+        )
+
+        assert response.status_code == 401
+
+    def test_get_db_structure_namespace_filter_with_token(self, delta_client):
+        """Test that filter_by_namespace=True with Authorization header passes token through."""
+        client, spark, user = delta_client
+
+        with patch(
+            "src.routes.delta.data_store.get_db_structure",
+            return_value={"u_testuser_db": ["t1"]},
+        ) as mock_struct:
+            response = client.post(
+                "/delta/databases/structure",
+                json={
+                    "with_schema": False,
+                    "use_hms": True,
+                    "filter_by_namespace": True,
+                },
+                headers={"Authorization": "Bearer test-kbase-token"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["structure"] == {"u_testuser_db": ["t1"]}
+        call_kwargs = mock_struct.call_args
+        assert call_kwargs.kwargs["filter_by_namespace"] is True
+        assert call_kwargs.kwargs["auth_token"] == "test-kbase-token"
 
 
 class TestCountTableEndpoint:
@@ -892,14 +935,23 @@ class TestConcurrentRequests:
 
 
 class TestTokenExtraction:
-    """Tests for the _extract_token_from_request helper."""
+    """Tests for get_token_from_request used by delta routes."""
 
     def test_extract_valid_bearer_token(self):
         """Test extracting valid Bearer token."""
         request = MagicMock()
         request.headers = {"Authorization": "Bearer my_token_12345"}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
+
+        assert token == "my_token_12345"
+
+    def test_extract_case_insensitive_scheme(self):
+        """Test that scheme matching is case-insensitive."""
+        request = MagicMock()
+        request.headers = {"Authorization": "bearer my_token_12345"}
+
+        token = get_token_from_request(request)
 
         assert token == "my_token_12345"
 
@@ -908,7 +960,7 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
 
         assert token is None
 
@@ -917,7 +969,7 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
 
         assert token is None
 
@@ -1075,7 +1127,11 @@ class TestStandaloneSubprocessDispatch:
         ) as mock_run:
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={
+                    "with_schema": False,
+                    "use_hms": True,
+                    "filter_by_namespace": False,
+                },
             )
 
         assert response.status_code == 200
@@ -1406,7 +1462,11 @@ class TestTrinoEngineDispatch:
         ):
             response = client.post(
                 "/delta/databases/structure",
-                json={"with_schema": False, "use_hms": True},
+                json={
+                    "with_schema": False,
+                    "use_hms": True,
+                    "filter_by_namespace": False,
+                },
             )
 
         assert response.status_code == 200
