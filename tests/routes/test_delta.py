@@ -15,7 +15,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.routes import delta
-from src.routes.delta import _extract_token_from_request, _make_trino_ctx, router
+from src.routes.delta import _make_trino_ctx, router
+from src.service.dependencies import get_token_from_request
 from src.service.dependencies import SparkContext, TrinoContext, get_spark_context, auth
 from src.service.exception_handlers import universal_error_handler
 from src.service.models import QueryEngine
@@ -934,14 +935,23 @@ class TestConcurrentRequests:
 
 
 class TestTokenExtraction:
-    """Tests for the _extract_token_from_request helper."""
+    """Tests for get_token_from_request used by delta routes."""
 
     def test_extract_valid_bearer_token(self):
         """Test extracting valid Bearer token."""
         request = MagicMock()
         request.headers = {"Authorization": "Bearer my_token_12345"}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
+
+        assert token == "my_token_12345"
+
+    def test_extract_case_insensitive_scheme(self):
+        """Test that scheme matching is case-insensitive."""
+        request = MagicMock()
+        request.headers = {"Authorization": "bearer my_token_12345"}
+
+        token = get_token_from_request(request)
 
         assert token == "my_token_12345"
 
@@ -950,7 +960,7 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
 
         assert token is None
 
@@ -959,7 +969,7 @@ class TestTokenExtraction:
         request = MagicMock()
         request.headers = {"Authorization": "Basic dXNlcjpwYXNz"}
 
-        token = _extract_token_from_request(request)
+        token = get_token_from_request(request)
 
         assert token is None
 
