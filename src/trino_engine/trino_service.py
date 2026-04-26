@@ -25,7 +25,6 @@ from src.delta_lake.delta_service import (
     _is_non_paginatable_query,
     _validate_identifier,
     build_select_query as _build_select_query_spark,
-    _check_exists,
 )
 from src.service.exceptions import (
     SparkQueryError,
@@ -53,6 +52,49 @@ def _validate_trino_identifier(name: str, identifier_type: str = "identifier") -
         _validate_identifier(name, identifier_type)
     except SparkQueryError as e:
         raise TrinoQueryError(str(e)) from e
+
+
+def _quote_trino_identifier(identifier: str) -> str:
+    """Quote a single Trino identifier component."""
+    escaped = str(identifier).replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _quote_qualified_identifier(
+    identifier: str,
+    identifier_type: str = "database",
+) -> str:
+    """Validate and quote a dotted Trino identifier."""
+    _validate_trino_identifier(identifier, identifier_type)
+    return ".".join(_quote_trino_identifier(part) for part in identifier.split("."))
+
+
+def _qualified_table_name(database: str, table: str) -> str:
+    """Return a safely quoted Trino table reference."""
+    return (
+        f"{_quote_qualified_identifier(database, 'database')}."
+        f"{_quote_qualified_identifier(table, 'table')}"
+    )
+
+
+def _check_exists_trino(conn: trino.dbapi.Connection, database: str, table: str) -> bool:
+    """Check whether a Trino table exists in a qualified database."""
+    _validate_trino_identifier(database, "database")
+    _validate_trino_identifier(table, "table")
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"SHOW TABLES FROM {_quote_qualified_identifier(database)}")
+        tables = {row[0] for row in cursor.fetchall()}
+    except Exception as e:
+        raise TrinoOperationError(
+            f"Database [{database}] not found or inaccessible: {e}"
+        ) from e
+
+    if table not in tables:
+        raise TrinoOperationError(f"Table [{table}] not found in database [{database}]")
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -323,8 +365,8 @@ def count_via_trino(
 
     _validate_trino_identifier(database, "database")
     _validate_trino_identifier(table, "table")
-    _check_exists(database, table)
-    full_table_name = f'"{database}"."{table}"'
+    _check_exists_trino(conn, database, table)
+    full_table_name = _qualified_table_name(database, table)
     logger.info(f"Counting rows in {full_table_name} via Trino")
 
     try:
@@ -377,12 +419,16 @@ def sample_via_trino(
         for col in columns:
             _validate_trino_identifier(col, "column")
 
-    _check_exists(database, table)
-    full_table_name = f'"{database}"."{table}"'
+    _check_exists_trino(conn, database, table)
+    full_table_name = _qualified_table_name(database, table)
     logger.info(f"Sampling {limit} rows from {full_table_name} via Trino")
 
     try:
-        col_expr = ", ".join(f'"{c}"' for c in columns) if columns else "*"
+        col_expr = (
+            ", ".join(_quote_qualified_identifier(c, "column") for c in columns)
+            if columns
+            else "*"
+        )
         sql = f"SELECT {col_expr} FROM {full_table_name}"
 
         if where_clause:
@@ -427,7 +473,7 @@ def select_via_trino(
             pagination=PaginationInfo(**cached[0]["pagination"]),
         )
 
-    _check_exists(request.database, request.table)
+    _check_exists_trino(conn, request.database, request.table)
 
     # Count query (without pagination)
     count_query = (

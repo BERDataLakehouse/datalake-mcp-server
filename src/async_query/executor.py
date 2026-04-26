@@ -238,6 +238,10 @@ class AsyncQueryExecutor:
             hive_metastore_uri=trino_settings["BERDL_HIVE_METASTORE_URI"],
             minio_endpoint_url=minio_endpoint,
             minio_secure=minio_secure,
+            polaris_catalog_uri=trino_settings.get("POLARIS_CATALOG_URI"),
+            polaris_credential=trino_settings.get("POLARIS_CREDENTIAL"),
+            polaris_personal_catalog=trino_settings.get("POLARIS_PERSONAL_CATALOG"),
+            polaris_tenant_catalogs=trino_settings.get("POLARIS_TENANT_CATALOGS"),
         )
         try:
             return await asyncio.to_thread(

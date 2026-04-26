@@ -236,10 +236,40 @@ def _get_delta_conf() -> dict[str, str]:
     }
 
 
+def _sanitize_catalog_alias(value: str) -> str:
+    """Normalize a value into a Spark/Trino-compatible catalog alias."""
+    return re.sub(r"[^a-z0-9_]", "_", value.lower()).strip("_")
+
+
+def _get_personal_catalog_aliases(personal_catalog: str | None) -> list[str]:
+    """Return Spark aliases for the current user's personal Polaris catalog."""
+    if not personal_catalog:
+        return []
+
+    aliases = ["my"]
+    portable_alias = personal_catalog.strip()
+    if portable_alias.startswith("user_"):
+        portable_alias = portable_alias[len("user_") :]
+    portable_alias = _sanitize_catalog_alias(portable_alias)
+    if portable_alias and portable_alias not in aliases:
+        aliases.append(portable_alias)
+    return aliases
+
+
+def _get_tenant_catalog_alias(tenant_catalog: str) -> str:
+    """Return the short engine alias for a Polaris tenant catalog."""
+    alias = tenant_catalog.strip()
+    if alias.startswith("tenant_"):
+        alias = alias[len("tenant_") :]
+    return _sanitize_catalog_alias(alias)
+
+
 def _get_catalog_conf(settings: BERDLSettings) -> dict[str, str]:
     """Get Iceberg catalog configuration for Polaris REST catalog."""
+    config = {}
+
     if not settings.POLARIS_CATALOG_URI:
-        return {}
+        return config
 
     polaris_uri = str(settings.POLARIS_CATALOG_URI).rstrip("/")
 
@@ -271,26 +301,36 @@ def _get_catalog_conf(settings: BERDLSettings) -> dict[str, str]:
             props[f"{prefix}.{k}"] = v
         return props
 
-    config = {}
     if settings.POLARIS_PERSONAL_CATALOG:
-        config.update(
-            _catalog_props("spark.sql.catalog.my", settings.POLARIS_PERSONAL_CATALOG)
-        )
+        for catalog_alias in _get_personal_catalog_aliases(
+            settings.POLARIS_PERSONAL_CATALOG
+        ):
+            config.update(
+                _catalog_props(
+                    f"spark.sql.catalog.{catalog_alias}",
+                    settings.POLARIS_PERSONAL_CATALOG,
+                )
+            )
     if settings.POLARIS_TENANT_CATALOGS:
         for tenant_catalog in settings.POLARIS_TENANT_CATALOGS.split(","):
             tenant_catalog = tenant_catalog.strip()
-            alias = tenant_catalog.replace("tenant_", "")
-            config.update(_catalog_props(f"spark.sql.catalog.{alias}", tenant_catalog))
+            if not tenant_catalog:
+                continue
+            catalog_alias = _get_tenant_catalog_alias(tenant_catalog)
+            if not catalog_alias:
+                continue
+            config.update(
+                _catalog_props(f"spark.sql.catalog.{catalog_alias}", tenant_catalog)
+            )
     return config
 
 
 def _get_hive_conf(settings: BERDLSettings) -> dict[str, str]:
+    # Do not set spark.sql.hive.metastore.version / .jars. Forcing version=4.0.0
+    # selects Spark's Hive 4 shim while the bundled client jars may be older.
     return {
-        "hive.metastore.uris": str(settings.BERDL_HIVE_METASTORE_URI),
+        "spark.hadoop.hive.metastore.uris": str(settings.BERDL_HIVE_METASTORE_URI),
         "spark.sql.catalogImplementation": "hive",
-        "spark.sql.hive.metastore.version": "4.0.0",
-        "spark.sql.hive.metastore.jars": "path",
-        "spark.sql.hive.metastore.jars.path": "/usr/local/spark/jars/*",
     }
 
 
@@ -397,6 +437,32 @@ def _filter_immutable_spark_connect_configs(config: dict[str, str]) -> dict[str,
 
     """
     return {k: v for k, v in config.items() if not _is_immutable_config(k)}
+
+
+def _warm_polaris_catalogs(spark: SparkSession, settings: BERDLSettings) -> None:
+    """
+    Touch Spark Connect Polaris catalogs so they are visible in SHOW CATALOGS.
+
+    Spark lazily initializes REST catalog plugins. Accessing each configured
+    alias once registers the server-side catalog with the session.
+    """
+    catalog_aliases: list[str] = []
+    catalog_aliases.extend(_get_personal_catalog_aliases(settings.POLARIS_PERSONAL_CATALOG))
+
+    if settings.POLARIS_TENANT_CATALOGS:
+        for raw_catalog in settings.POLARIS_TENANT_CATALOGS.split(","):
+            raw_catalog = raw_catalog.strip()
+            if not raw_catalog:
+                continue
+            alias = _get_tenant_catalog_alias(raw_catalog)
+            if alias:
+                catalog_aliases.append(alias)
+
+    for alias in catalog_aliases:
+        try:
+            spark.sql(f"SHOW NAMESPACES IN {alias}").collect()
+        except Exception:
+            logger.debug("Unable to warm Polaris catalog alias '%s'", alias, exc_info=True)
 
 
 def _set_scheduler_pool(spark: SparkSession, scheduler_pool: str) -> None:
@@ -753,6 +819,13 @@ def get_spark_session(
     # This can be done outside the lock as it operates on the session instance
     if not local and not use_spark_connect:
         _set_scheduler_pool(spark, scheduler_pool)
+
+    if use_spark_connect and not local:
+        effective_settings = settings
+        if effective_settings is None:
+            get_settings.cache_clear()
+            effective_settings = get_settings()
+        _warm_polaris_catalogs(spark, effective_settings)
 
     return spark
 

@@ -159,6 +159,14 @@ async def submit_async_query(
             "TRINO_HOST": settings.TRINO_HOST,
             "TRINO_PORT": settings.TRINO_PORT,
             "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+            "POLARIS_CATALOG_URI": ctx.settings_dict.get("POLARIS_CATALOG_URI"),
+            "POLARIS_CREDENTIAL": ctx.settings_dict.get("POLARIS_CREDENTIAL"),
+            "POLARIS_PERSONAL_CATALOG": ctx.settings_dict.get(
+                "POLARIS_PERSONAL_CATALOG"
+            ),
+            "POLARIS_TENANT_CATALOGS": ctx.settings_dict.get(
+                "POLARIS_TENANT_CATALOGS"
+            ),
         }
 
     # Submit to background executor

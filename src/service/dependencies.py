@@ -10,7 +10,7 @@ import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Generator
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import grpc
 import httpx
@@ -192,6 +192,124 @@ def fetch_user_minio_credentials(
         f"Successfully fetched MinIO credentials for user: {data.get('username')}"
     )
     return access_key, secret_key
+
+
+def fetch_user_polaris_credentials(
+    governance_api_url: str,
+    username: str,
+    auth_token: str,
+) -> dict[str, str] | None:
+    """
+    Provision and fetch the user's Polaris credentials from the Governance API.
+
+    Mirrors spark_notebook's startup flow by calling
+    POST /polaris/user_provision/{username}. The Governance API reuses cached
+    credentials server-side and returns the personal and tenant Polaris catalogs
+    the user can access.
+    """
+    safe_username = quote(username, safe="")
+    url = f"{str(governance_api_url).rstrip('/')}/polaris/user_provision/{safe_username}"
+    logger.debug(f"Fetching Polaris credentials from governance API: {url}")
+
+    response = httpx.post(
+        url, headers={"Authorization": f"Bearer {auth_token}"}, timeout=30.0
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    personal_catalog = data.get("personal_catalog")
+    tenant_catalogs = data.get("tenant_catalogs") or []
+
+    if not client_id or not client_secret or not personal_catalog:
+        raise ValueError(
+            "Invalid Polaris response from governance API: missing "
+            "client_id, client_secret, or personal_catalog"
+        )
+
+    if isinstance(tenant_catalogs, str):
+        tenant_catalogs_value = tenant_catalogs
+    else:
+        tenant_catalogs_value = ",".join(str(c) for c in tenant_catalogs if c)
+
+    logger.info(f"Successfully fetched Polaris credentials for user: {username}")
+    return {
+        "POLARIS_CREDENTIAL": f"{client_id}:{client_secret}",
+        "POLARIS_PERSONAL_CATALOG": str(personal_catalog),
+        "POLARIS_TENANT_CATALOGS": tenant_catalogs_value,
+    }
+
+
+def _get_effective_polaris_settings(
+    settings: BERDLSettings,
+    username: str,
+    auth_token: str,
+) -> dict[str, str | None]:
+    """Build per-user Polaris settings, fetching fresh credentials when configured."""
+    polaris_settings: dict[str, str | None] = {
+        "POLARIS_CATALOG_URI": str(settings.POLARIS_CATALOG_URI)
+        if settings.POLARIS_CATALOG_URI
+        else None,
+        "POLARIS_CREDENTIAL": settings.POLARIS_CREDENTIAL,
+        "POLARIS_PERSONAL_CATALOG": settings.POLARIS_PERSONAL_CATALOG,
+        "POLARIS_TENANT_CATALOGS": settings.POLARIS_TENANT_CATALOGS,
+    }
+
+    if not settings.POLARIS_CATALOG_URI:
+        return polaris_settings
+
+    try:
+        fetched_settings = fetch_user_polaris_credentials(
+            settings.GOVERNANCE_API_URL,
+            username,
+            auth_token,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch Polaris credentials for %s: %s: %s. "
+            "Continuing with configured Polaris settings.",
+            username,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
+        return polaris_settings
+
+    if fetched_settings:
+        polaris_settings.update(fetched_settings)
+    return polaris_settings
+
+
+def _build_user_settings_dict(
+    settings: BERDLSettings,
+    username: str,
+    auth_token: str,
+    minio_access_key: str,
+    minio_secret_key: str,
+) -> dict[str, str | int | bool | None]:
+    """Build picklable per-user settings for Spark, Trino, and async subprocesses."""
+    return {
+        "KBASE_AUTH_TOKEN": auth_token,
+        "USER": username,
+        "MINIO_ACCESS_KEY": minio_access_key,
+        "MINIO_SECRET_KEY": minio_secret_key,
+        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+        "MINIO_SECURE": settings.MINIO_SECURE,
+        "SPARK_HOME": settings.SPARK_HOME,
+        "SPARK_MASTER_URL": str(settings.SPARK_MASTER_URL)
+        if settings.SPARK_MASTER_URL
+        else None,
+        "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
+        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
+        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
+        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
+        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
+        "GOVERNANCE_API_URL": str(settings.GOVERNANCE_API_URL),
+        "BERDL_POD_IP": settings.BERDL_POD_IP,
+        **_get_effective_polaris_settings(settings, username, auth_token),
+    }
 
 
 def get_user_from_request(request: Request) -> str:
@@ -449,27 +567,13 @@ def get_spark_context(
             f"{type(e).__name__}: {e}"
         )
 
-    # Build base user-specific settings as picklable dict
-    # Note: URLs are converted to strings for pickling
-    base_user_settings_dict = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "SPARK_HOME": settings.SPARK_HOME,
-        "SPARK_MASTER_URL": str(settings.SPARK_MASTER_URL)
-        if settings.SPARK_MASTER_URL
-        else None,
-        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
-        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
-        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
-        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
-        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
-        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
-        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
-        "BERDL_POD_IP": settings.BERDL_POD_IP,
-    }
+    base_user_settings_dict = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
 
     # Try Spark Connect first with gRPC health check
     spark_connect_url = construct_user_spark_connect_url(username)
@@ -497,7 +601,6 @@ def get_spark_context(
         try:
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                KBASE_AUTH_TOKEN=auth_token or "",
                 **{
                     k: v
                     for k, v in base_user_settings_dict.items()
@@ -679,23 +782,13 @@ def get_spark_session(
             f"{type(e).__name__}: {e}"
         )
 
-    base_user_settings = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "SPARK_HOME": settings.SPARK_HOME,
-        "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
-        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
-        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
-        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
-        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
-        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
-        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
-        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
-        "BERDL_POD_IP": settings.BERDL_POD_IP,
-    }
+    base_user_settings = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
 
     spark_connect_url = construct_user_spark_connect_url(username)
     use_spark_connect = is_spark_connect_reachable(spark_connect_url, timeout=2.0)
@@ -794,6 +887,14 @@ def get_trino_context(
             f"for user {username}: {type(e).__name__}: {e}"
         ) from e
 
+    user_settings_dict = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
+
     conn = create_trino_connection(
         username=username,
         auth_token=auth_token,
@@ -804,18 +905,16 @@ def get_trino_context(
         hive_metastore_uri=str(settings.BERDL_HIVE_METASTORE_URI),
         minio_endpoint_url=settings.MINIO_ENDPOINT_URL,
         minio_secure=settings.MINIO_SECURE,
+        polaris_catalog_uri=user_settings_dict.get("POLARIS_CATALOG_URI"),
+        polaris_credential=user_settings_dict.get("POLARIS_CREDENTIAL"),
+        polaris_personal_catalog=user_settings_dict.get("POLARIS_PERSONAL_CATALOG"),
+        polaris_tenant_catalogs=user_settings_dict.get("POLARIS_TENANT_CATALOGS"),
     )
 
     settings_dict = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        **user_settings_dict,
         "TRINO_HOST": settings.TRINO_HOST,
         "TRINO_PORT": settings.TRINO_PORT,
-        "GOVERNANCE_API_URL": str(settings.GOVERNANCE_API_URL),
     }
 
     ctx = TrinoContext(

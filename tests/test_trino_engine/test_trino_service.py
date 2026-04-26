@@ -394,7 +394,7 @@ class TestCountViaTrino:
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
     @patch("src.trino_engine.trino_service._store_in_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_returns_count(self, mock_exists, mock_store, mock_cache, mock_conn):
         conn, cursor = mock_conn
         cursor.fetchone.return_value = (42,)
@@ -403,7 +403,7 @@ class TestCountViaTrino:
         assert result == 42
 
     @patch("src.trino_engine.trino_service._get_from_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_cache_hit(self, mock_exists, mock_cache, mock_conn):
         conn, _ = mock_conn
         mock_cache.return_value = [{"count": 100}]
@@ -412,7 +412,7 @@ class TestCountViaTrino:
         assert result == 100
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_query_error_raises_trino_error(self, mock_exists, mock_cache, mock_conn):
         conn, cursor = mock_conn
         cursor.execute.side_effect = Exception("Trino down")
@@ -441,7 +441,7 @@ class TestSampleViaTrino:
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
     @patch("src.trino_engine.trino_service._store_in_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_basic_sample(self, mock_exists, mock_store, mock_cache, mock_conn):
         conn, cursor = mock_conn
         cursor.description = [("id",), ("name",)]
@@ -453,7 +453,7 @@ class TestSampleViaTrino:
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
     @patch("src.trino_engine.trino_service._store_in_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     @patch("src.trino_engine.trino_service._check_query_is_valid")
     def test_with_where_clause(
         self, mock_validate, mock_exists, mock_store, mock_cache, mock_conn
@@ -472,7 +472,7 @@ class TestSampleViaTrino:
         assert "WHERE id > 0" in executed_sql
 
     @patch("src.trino_engine.trino_service._get_from_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_cache_hit(self, mock_exists, mock_cache, mock_conn):
         """Lines 293-294: sample returns cached data."""
         conn, _ = mock_conn
@@ -484,7 +484,7 @@ class TestSampleViaTrino:
         mock_exists.assert_not_called()
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_query_error_raises(self, mock_exists, mock_cache, mock_conn):
         """Lines 322-324: sample query exception raises TrinoOperationError."""
         conn, cursor = mock_conn
@@ -526,7 +526,7 @@ class TestSelectViaTrino:
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
     @patch("src.trino_engine.trino_service._store_in_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     @patch("src.trino_engine.trino_service.build_select_query_trino")
     def test_basic_select(
         self, mock_build, mock_exists, mock_store, mock_cache, mock_conn
@@ -553,7 +553,7 @@ class TestSelectViaTrino:
         assert result.pagination.total_count == 10
 
     @patch("src.trino_engine.trino_service._get_from_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     def test_cache_hit(self, mock_exists, mock_cache, mock_conn):
         """Lines 343-344: select returns from cache."""
         conn, _ = mock_conn
@@ -578,7 +578,7 @@ class TestSelectViaTrino:
         assert result.pagination.total_count == 1
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     @patch("src.trino_engine.trino_service.build_select_query_trino")
     def test_count_query_error_raises(
         self, mock_build, mock_exists, mock_cache, mock_conn
@@ -596,7 +596,7 @@ class TestSelectViaTrino:
 
     @patch("src.trino_engine.trino_service._get_from_cache", return_value=None)
     @patch("src.trino_engine.trino_service._store_in_cache")
-    @patch("src.trino_engine.trino_service._check_exists")
+    @patch("src.trino_engine.trino_service._check_exists_trino")
     @patch("src.trino_engine.trino_service.build_select_query_trino")
     def test_main_query_error_raises(
         self, mock_build, mock_exists, mock_store, mock_cache, mock_conn

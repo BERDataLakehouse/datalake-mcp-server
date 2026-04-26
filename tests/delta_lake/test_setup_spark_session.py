@@ -318,7 +318,7 @@ class TestGetHiveConf:
         """Test Hive metastore URI is configured."""
         config = _get_hive_conf(test_settings)
 
-        assert config["hive.metastore.uris"] == str(
+        assert config["spark.hadoop.hive.metastore.uris"] == str(
             test_settings.BERDL_HIVE_METASTORE_URI
         )
 
@@ -328,13 +328,13 @@ class TestGetHiveConf:
 
         assert config["spark.sql.catalogImplementation"] == "hive"
 
-    def test_hive_metastore_version(self, test_settings):
-        """Test Hive metastore version."""
+    def test_hive_metastore_client_jars_not_forced(self, test_settings):
+        """Test Hive client jar settings are left to the runtime image."""
         config = _get_hive_conf(test_settings)
 
-        assert config["spark.sql.hive.metastore.version"] == "4.0.0"
-        assert config["spark.sql.hive.metastore.jars"] == "path"
-        assert "spark.sql.hive.metastore.jars.path" in config
+        assert "spark.sql.hive.metastore.version" not in config
+        assert "spark.sql.hive.metastore.jars" not in config
+        assert "spark.sql.hive.metastore.jars.path" not in config
 
 
 # =============================================================================
@@ -450,6 +450,11 @@ class TestGetCatalogConf:
         assert config["spark.sql.catalog.my.warehouse"] == "user_testuser"
         assert config["spark.sql.catalog.my.s3.endpoint"] == "http://minio:9000"
         assert config["spark.sql.catalog.my.s3.path-style-access"] == "true"
+        assert (
+            config["spark.sql.catalog.testuser"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
+        assert config["spark.sql.catalog.testuser.warehouse"] == "user_testuser"
 
     def test_tenant_catalogs_configured(self):
         """Test tenant catalogs with alias stripping."""
@@ -508,6 +513,10 @@ class TestGetCatalogConf:
         # Catalog config should be present in standalone mode
         assert config["spark.sql.catalog.my"] == "org.apache.iceberg.spark.SparkCatalog"
         assert config["spark.sql.catalog.my.uri"] == "http://polaris:8181/api/catalog"
+        assert (
+            config["spark.sql.catalog.testuser"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
 
     def test_catalog_filtered_in_spark_connect_mode(self):
         """Test that catalog configs are filtered out in Spark Connect mode (immutable)."""
@@ -533,6 +542,7 @@ class TestGetCatalogConf:
         # Catalog configs should be filtered out (they're immutable/server-side)
         assert "spark.sql.catalog.my" not in config
         assert "spark.sql.catalog.my.uri" not in config
+        assert "spark.sql.catalog.testuser" not in config
 
 
 # =============================================================================
@@ -815,7 +825,7 @@ class TestGenerateSparkConf:
             use_spark_connect=True,
         )
 
-        assert "hive.metastore.uris" not in config
+        assert "spark.hadoop.hive.metastore.uris" not in config
 
     def test_with_tenant_name(self, test_settings):
         """Test configuration with tenant name."""
@@ -848,6 +858,10 @@ class TestGenerateSparkConf:
             mock_settings.MINIO_SECURE = False
             mock_settings.USER = "testuser"
             mock_settings.BERDL_HIVE_METASTORE_URI = AnyUrl("thrift://localhost:9083")
+            mock_settings.POLARIS_CATALOG_URI = None
+            mock_settings.POLARIS_CREDENTIAL = None
+            mock_settings.POLARIS_PERSONAL_CATALOG = None
+            mock_settings.POLARIS_TENANT_CATALOGS = None
 
             mock_get.return_value = mock_settings
 

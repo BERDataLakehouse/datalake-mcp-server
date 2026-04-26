@@ -80,12 +80,21 @@ class TestGetDatabasesTrino:
 
     def test_trino_sql_mode(self, mock_conn, mock_settings):
         conn, cursor = mock_conn
-        cursor.fetchall.return_value = [("default",), ("mydb",)]
+        cursor.fetchall.side_effect = [
+            [("system",), ("my",), ("globalusers",)],
+            [("shared",)],
+            [("default",), ("demo",), ("information_schema",)],
+        ]
 
         result = get_databases_trino(conn, use_hms=False, settings=mock_settings)
 
-        assert result == ["default", "mydb"]
-        cursor.execute.assert_called_with("SHOW SCHEMAS")
+        assert result == ["globalusers.shared", "my.default", "my.demo"]
+        assert cursor.execute.call_args_list[0].args[0] == "SHOW CATALOGS"
+        assert (
+            cursor.execute.call_args_list[1].args[0]
+            == 'SHOW SCHEMAS FROM "globalusers"'
+        )
+        assert cursor.execute.call_args_list[2].args[0] == 'SHOW SCHEMAS FROM "my"'
 
     def test_trino_sql_error_raises(self, mock_conn, mock_settings):
         conn, cursor = mock_conn
@@ -116,10 +125,12 @@ class TestGetTablesTrino:
         conn, cursor = mock_conn
         cursor.fetchall.return_value = [("orders",), ("users",)]
 
-        result = get_tables_trino(conn, "mydb", use_hms=False, settings=mock_settings)
+        result = get_tables_trino(
+            conn, "my.demo", use_hms=False, settings=mock_settings
+        )
 
         assert result == ["orders", "users"]
-        cursor.execute.assert_called_with('SHOW TABLES FROM "mydb"')
+        cursor.execute.assert_called_with('SHOW TABLES FROM "my"."demo"')
 
     @patch("src.trino_engine.trino_data_store.get_settings")
     @patch("src.trino_engine.trino_data_store.hive_metastore.get_tables")
@@ -168,10 +179,10 @@ class TestGetTableSchemaTrino:
             ("name", "varchar", "", ""),
         ]
 
-        result = get_table_schema_trino(conn, "mydb", "users")
+        result = get_table_schema_trino(conn, "my.demo", "users")
 
         assert result == ["id", "name"]
-        cursor.execute.assert_called_with('SHOW COLUMNS FROM "mydb"."users"')
+        cursor.execute.assert_called_with('SHOW COLUMNS FROM "my"."demo"."users"')
 
     def test_error_raises(self, mock_conn):
         conn, cursor = mock_conn
@@ -220,7 +231,7 @@ class TestGetDbStructureTrino:
         mock_get_settings.assert_called_once()
         mock_dbs.assert_called_once_with(
             conn,
-            use_hms=True,
+            use_hms=False,
             filter_by_namespace=False,
             auth_token=None,
             settings=fallback_settings,
