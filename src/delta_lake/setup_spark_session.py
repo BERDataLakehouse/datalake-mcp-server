@@ -447,7 +447,9 @@ def _warm_polaris_catalogs(spark: SparkSession, settings: BERDLSettings) -> None
     alias once registers the server-side catalog with the session.
     """
     catalog_aliases: list[str] = []
-    catalog_aliases.extend(_get_personal_catalog_aliases(settings.POLARIS_PERSONAL_CATALOG))
+    catalog_aliases.extend(
+        _get_personal_catalog_aliases(settings.POLARIS_PERSONAL_CATALOG)
+    )
 
     if settings.POLARIS_TENANT_CATALOGS:
         for raw_catalog in settings.POLARIS_TENANT_CATALOGS.split(","):
@@ -462,7 +464,9 @@ def _warm_polaris_catalogs(spark: SparkSession, settings: BERDLSettings) -> None
         try:
             spark.sql(f"SHOW NAMESPACES IN {alias}").collect()
         except Exception:
-            logger.debug("Unable to warm Polaris catalog alias '%s'", alias, exc_info=True)
+            logger.debug(
+                "Unable to warm Polaris catalog alias '%s'", alias, exc_info=True
+            )
 
 
 def _set_scheduler_pool(spark: SparkSession, scheduler_pool: str) -> None:

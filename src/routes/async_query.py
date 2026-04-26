@@ -164,9 +164,7 @@ async def submit_async_query(
             "POLARIS_PERSONAL_CATALOG": ctx.settings_dict.get(
                 "POLARIS_PERSONAL_CATALOG"
             ),
-            "POLARIS_TENANT_CATALOGS": ctx.settings_dict.get(
-                "POLARIS_TENANT_CATALOGS"
-            ),
+            "POLARIS_TENANT_CATALOGS": ctx.settings_dict.get("POLARIS_TENANT_CATALOGS"),
         }
 
     # Submit to background executor

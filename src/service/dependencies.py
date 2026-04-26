@@ -208,7 +208,9 @@ def fetch_user_polaris_credentials(
     the user can access.
     """
     safe_username = quote(username, safe="")
-    url = f"{str(governance_api_url).rstrip('/')}/polaris/user_provision/{safe_username}"
+    url = (
+        f"{str(governance_api_url).rstrip('/')}/polaris/user_provision/{safe_username}"
+    )
     logger.debug(f"Fetching Polaris credentials from governance API: {url}")
 
     response = httpx.post(

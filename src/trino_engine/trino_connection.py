@@ -111,7 +111,9 @@ def _iter_tenant_catalogs(tenant_catalogs: str | None) -> list[str]:
     """Parse configured Polaris tenant catalog names."""
     if not tenant_catalogs:
         return []
-    return [catalog.strip() for catalog in tenant_catalogs.split(",") if catalog.strip()]
+    return [
+        catalog.strip() for catalog in tenant_catalogs.split(",") if catalog.strip()
+    ]
 
 
 def _build_iceberg_catalog_properties(

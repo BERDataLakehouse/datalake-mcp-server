@@ -77,7 +77,9 @@ def _qualified_table_name(database: str, table: str) -> str:
     )
 
 
-def _check_exists_trino(conn: trino.dbapi.Connection, database: str, table: str) -> bool:
+def _check_exists_trino(
+    conn: trino.dbapi.Connection, database: str, table: str
+) -> bool:
     """Check whether a Trino table exists in a qualified database."""
     _validate_trino_identifier(database, "database")
     _validate_trino_identifier(table, "table")
