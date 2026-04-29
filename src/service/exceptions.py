@@ -15,6 +15,16 @@ class SparkSessionError(MCPServerError):
     """
 
 
+class SparkConnectUnavailableError(SparkSessionError):
+    """
+    The user's Spark Connect server is reachable at the gRPC level but cannot
+    execute SQL — typically because the JVM driver in their notebook pod is
+    deadlocked. The fix is to restart the notebook pod; we surface this as a
+    fast, clear 503 instead of letting every subsequent SQL call hang the
+    full request-timeout window.
+    """
+
+
 class SparkOperationError(SparkSessionError):
     """
     An error thrown when a Spark operation fails.

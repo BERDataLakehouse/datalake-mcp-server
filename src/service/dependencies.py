@@ -28,13 +28,24 @@ from src.delta_lake.setup_spark_session import (
     get_spark_session as _get_spark_session,
     get_spark_session_with_retry as _get_spark_session_with_retry,
 )
-from src.service import app_state
-from src.service.exceptions import MissingTokenError, TrinoConnectionError
+from src.service import app_state, sc_health
+from src.service.exceptions import (
+    MissingTokenError,
+    SparkConnectUnavailableError,
+    TrinoConnectionError,
+)
 from src.service.http_bearer import KBaseHTTPBearer
 from src.service.models import QueryEngine
 from src.service.spark_session_pool import STANDALONE_POOL_SIZE
+from src.service.timeouts import run_with_timeout
 from src.settings import BERDLSettings, get_settings
 from src.trino_engine.trino_connection import create_trino_connection
+
+# How long to wait for a SQL probe (`SELECT 1`) when validating a freshly
+# created Spark Connect session. Healthy SCs respond in < 100 ms; 5 s gives
+# generous headroom while still being short enough that a hung user notebook
+# is detected long before a 115 s request-timeout budget would expire.
+_SC_PROBE_TIMEOUT_SECONDS = float(os.getenv("SC_PROBE_TIMEOUT_SECONDS", "5"))
 
 # Initialize the KBase auth dependency for use in routes
 auth = KBaseHTTPBearer()
@@ -653,6 +664,23 @@ def get_spark_context(
             "Spark Connect server reachable, creating session (no lock required)"
         )
 
+        # FAST PATH: a recent SQL probe failed for this user — short-circuit
+        # before paying the cost of session creation + another probe. The
+        # mark expires after sc_health.SC_UNHEALTHY_TTL so we re-probe on
+        # the next request after that window.
+        if sc_health.is_unhealthy(username):
+            logger.info(
+                f"Spark Connect for {username} is marked unhealthy "
+                f"(last probe failed within {sc_health.SC_UNHEALTHY_TTL}s); "
+                f"short-circuiting before session creation."
+            )
+            raise SparkConnectUnavailableError(
+                f"Spark Connect server for user '{username}' was unresponsive "
+                f"to a SQL probe within the last "
+                f"{int(sc_health.SC_UNHEALTHY_TTL)}s. The notebook pod's JVM "
+                f"driver is likely deadlocked — restart the notebook to recover."
+            )
+
         # Session creation phase - exceptions here trigger fallback to Standalone
         spark = None
         app_name = f"datalake_mcp_server_{username}"
@@ -678,17 +706,6 @@ def get_spark_context(
                 max_retries=2,
             )
 
-            # Validate session works before returning by making a quick server round-trip
-            # This catches any remaining edge cases where session appears valid but isn't
-            try:
-                _ = spark.version
-            except Exception as validation_error:
-                logger.warning(
-                    f"Session validation failed for {username}, session may be unusable: "
-                    f"{type(validation_error).__name__}: {validation_error}"
-                )
-                raise
-
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
         except Exception as e:
@@ -700,6 +717,39 @@ def get_spark_context(
                 exc_info=True,
             )
             spark_connect_failed = True
+
+        # SQL PROBE: separate from session creation. If session creation
+        # succeeded but the JVM driver is wedged at the SQL level (the
+        # actual failure mode we've observed in stage), spark.sql(...) will
+        # hang for the full request-timeout budget — and so will every
+        # subsequent request from this user. Run a cheap `SELECT 1` with a
+        # tight bound; on failure mark the user unhealthy and fail fast
+        # with a clear actionable error instead of silently falling back to
+        # the standalone subprocess pool (which would hide the real problem
+        # AND eat shared standalone capacity).
+        if spark is not None and not spark_connect_failed:
+            try:
+                run_with_timeout(
+                    lambda: spark.sql("SELECT 1").collect(),
+                    timeout_seconds=_SC_PROBE_TIMEOUT_SECONDS,
+                    operation_name=f"sc_health_probe[{username}]",
+                )
+            except Exception as probe_error:
+                logger.warning(
+                    f"Spark Connect SQL probe failed for {username}: "
+                    f"{type(probe_error).__name__}: {probe_error}. Marking SC "
+                    f"unhealthy for {sc_health.SC_UNHEALTHY_TTL}s."
+                )
+                sc_health.mark_unhealthy(username)
+                raise SparkConnectUnavailableError(
+                    f"Spark Connect server for user '{username}' accepted a "
+                    f"session but did not respond to a SELECT 1 probe within "
+                    f"{int(_SC_PROBE_TIMEOUT_SECONDS)}s. The notebook pod's "
+                    f"JVM driver is likely deadlocked — restart the notebook "
+                    f"to recover. Subsequent requests for the next "
+                    f"{int(sc_health.SC_UNHEALTHY_TTL)}s will short-circuit "
+                    f"with this error."
+                )
 
         # Yield phase - OUTSIDE the try/except so route execution errors propagate
         # correctly instead of triggering a fallback (which would yield twice)
