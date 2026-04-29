@@ -138,8 +138,11 @@ class TestGetDatabases:
         """Test that databases are returned in catalog.namespace format."""
         mock_spark = MagicMock()
 
-        with patch.object(
-            data_store, "_list_iceberg_catalogs", return_value=["kbase", "my"]
+        with (
+            patch.object(
+                data_store, "_list_iceberg_catalogs", return_value=["kbase", "my"]
+            ),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
         ):
 
             def sql_side_effect(query):
@@ -171,7 +174,10 @@ class TestGetDatabases:
         """Test that get_databases can return JSON."""
         mock_spark = MagicMock()
 
-        with patch.object(data_store, "_list_iceberg_catalogs", return_value=["my"]):
+        with (
+            patch.object(data_store, "_list_iceberg_catalogs", return_value=["my"]),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
+        ):
             mock_spark.sql.return_value.collect.return_value = [{"namespace": "demo"}]
 
             result = data_store.get_databases(spark=mock_spark, return_json=True)
@@ -182,8 +188,11 @@ class TestGetDatabases:
         """Test that inaccessible catalogs are skipped."""
         mock_spark = MagicMock()
 
-        with patch.object(
-            data_store, "_list_iceberg_catalogs", return_value=["my", "broken"]
+        with (
+            patch.object(
+                data_store, "_list_iceberg_catalogs", return_value=["my", "broken"]
+            ),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
         ):
 
             def sql_side_effect(query):
@@ -203,10 +212,59 @@ class TestGetDatabases:
         """Test get_databases with no catalogs."""
         mock_spark = MagicMock()
 
-        with patch.object(data_store, "_list_iceberg_catalogs", return_value=[]):
+        with (
+            patch.object(data_store, "_list_iceberg_catalogs", return_value=[]),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
+        ):
             result = data_store.get_databases(spark=mock_spark, return_json=False)
 
         assert result == []
+
+    def test_includes_hive_databases(self):
+        """Hive (spark_catalog) databases are listed alongside Iceberg namespaces."""
+        mock_spark = MagicMock()
+
+        with (
+            patch.object(data_store, "_list_iceberg_catalogs", return_value=["my"]),
+            patch.object(
+                data_store,
+                "_list_hive_databases",
+                return_value=["u_alice__demo", "default"],
+            ),
+        ):
+            mock_spark.sql.return_value.collect.return_value = [{"namespace": "demo"}]
+
+            result = data_store.get_databases(spark=mock_spark, return_json=False)
+
+        assert result == ["default", "my.demo", "u_alice__demo"]
+
+
+# =============================================================================
+# Test _list_hive_databases
+# =============================================================================
+
+
+class TestListHiveDatabases:
+    """Tests for _list_hive_databases."""
+
+    def test_returns_flat_database_names(self):
+        mock_spark = MagicMock()
+        mock_spark.sql.return_value.collect.return_value = [
+            {"namespace": "u_alice__demo"},
+            {"namespace": "default"},
+        ]
+
+        result = data_store._list_hive_databases(mock_spark)
+
+        mock_spark.sql.assert_called_once_with("SHOW DATABASES IN spark_catalog")
+        assert result == ["default", "u_alice__demo"]
+
+    def test_returns_empty_on_failure(self):
+        """A broken/disconnected Hive Metastore must not break Iceberg listing."""
+        mock_spark = MagicMock()
+        mock_spark.sql.side_effect = Exception("HMS unreachable")
+
+        assert data_store._list_hive_databases(mock_spark) == []
 
 
 # =============================================================================

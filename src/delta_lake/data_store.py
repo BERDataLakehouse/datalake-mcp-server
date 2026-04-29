@@ -62,15 +62,35 @@ def _list_iceberg_catalogs(spark: SparkSession) -> List[str]:
     return sorted(c for c in catalog_names if c not in _EXCLUDED_CATALOGS)
 
 
+def _list_hive_databases(spark: SparkSession) -> List[str]:
+    """List Hive databases registered under spark_catalog (Delta tables).
+
+    Iceberg catalogs use 3-level naming and are listed via ``SHOW NAMESPACES``;
+    Delta/Hive databases live in ``spark_catalog`` (which is the Spark default
+    catalog and is bound to ``DeltaCatalog`` in this service). They show up as
+    flat names (e.g., ``u_alice__demo``) and are queryable as
+    ``SELECT * FROM {database}.{table}`` because Spark resolves unqualified
+    references against ``spark_catalog``.
+    """
+    try:
+        rows = spark.sql("SHOW DATABASES IN spark_catalog").collect()
+        return sorted(row["namespace"] for row in rows)
+    except Exception as e:
+        logger.warning(f"Failed to list Hive databases: {e}")
+        return []
+
+
 def get_databases(
     spark: Optional[SparkSession] = None,
     return_json: bool = True,
 ) -> Union[str, List[str]]:
     """
-    List all accessible Iceberg namespaces across all catalogs.
+    List all accessible databases across Iceberg and Hive catalogs.
 
-    Returns namespaces in ``catalog.namespace`` format (e.g., ``my.demo``,
-    ``globalusers.shared_data``). These can be used directly in table references:
+    Iceberg namespaces are returned in ``catalog.namespace`` format (e.g.,
+    ``my.demo``, ``globalusers.shared_data``). Hive databases (Delta tables
+    registered under ``spark_catalog``) are returned as flat names (e.g.,
+    ``u_alice__demo``). All forms can be used directly in table references:
     ``SELECT * FROM {database}.{table}``.
 
     Args:
@@ -78,7 +98,8 @@ def get_databases(
         return_json: Whether to return JSON string or raw list
 
     Returns:
-        Sorted list of ``catalog.namespace`` strings
+        Sorted list of database identifiers (Iceberg ``catalog.namespace`` and
+        Hive flat names interleaved)
 
     Raises:
         ValueError: If spark is not provided
@@ -99,6 +120,8 @@ def get_databases(
                 databases.append(f"{catalog}.{row['namespace']}")
         except Exception as e:
             logger.warning(f"Failed to list namespaces in catalog '{catalog}': {e}")
+
+    databases.extend(_list_hive_databases(spark))
 
     return _format_output(sorted(databases), return_json)
 
