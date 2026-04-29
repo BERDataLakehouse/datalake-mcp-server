@@ -332,26 +332,26 @@ class TestGetDatabases:
 
 
 class TestListHiveDatabases:
-    """Tests for _list_hive_databases."""
+    """Tests for _list_hive_databases (direct HMS Thrift, no Spark)."""
 
-    def test_returns_flat_database_names(self):
-        mock_spark = MagicMock()
-        mock_spark.sql.return_value.collect.return_value = [
-            {"namespace": "u_alice__demo"},
-            {"namespace": "default"},
-        ]
+    def test_returns_sorted_database_names_via_hms(self):
+        with patch.object(
+            data_store.hive_metastore,
+            "get_databases",
+            return_value=["u_alice__demo", "default"],
+        ):
+            result = data_store._list_hive_databases()
 
-        result = data_store._list_hive_databases(mock_spark)
-
-        mock_spark.sql.assert_called_once_with("SHOW DATABASES IN spark_catalog")
         assert result == ["default", "u_alice__demo"]
 
-    def test_returns_empty_on_failure(self):
+    def test_returns_empty_on_hms_failure(self):
         """A broken/disconnected Hive Metastore must not break Iceberg listing."""
-        mock_spark = MagicMock()
-        mock_spark.sql.side_effect = Exception("HMS unreachable")
-
-        assert data_store._list_hive_databases(mock_spark) == []
+        with patch.object(
+            data_store.hive_metastore,
+            "get_databases",
+            side_effect=Exception("HMS unreachable"),
+        ):
+            assert data_store._list_hive_databases() == []
 
 
 # =============================================================================

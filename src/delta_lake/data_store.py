@@ -21,10 +21,12 @@ from typing import Any, Dict, List, Optional, Union
 
 from pyspark.sql import SparkSession
 
+from src.delta_lake import hive_metastore
 from src.delta_lake.setup_spark_session import (
     _get_personal_catalog_aliases,
     _get_tenant_catalog_alias,
 )
+from src.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -128,19 +130,20 @@ def _filter_to_user_namespaces(
     return result
 
 
-def _list_hive_databases(spark: SparkSession) -> List[str]:
-    """List Hive databases registered under spark_catalog (Delta tables).
+def _list_hive_databases() -> List[str]:
+    """List Hive databases (Delta tables) directly via the HMS Thrift client.
 
-    Iceberg catalogs use 3-level naming and are listed via ``SHOW NAMESPACES``;
-    Delta/Hive databases live in ``spark_catalog`` (which is the Spark default
-    catalog and is bound to ``DeltaCatalog`` in this service). They show up as
-    flat names (e.g., ``u_alice__demo``) and are queryable as
-    ``SELECT * FROM {database}.{table}`` because Spark resolves unqualified
-    references against ``spark_catalog``.
+    Deliberately avoids Spark Connect: a hung user Spark Connect server must
+    not block the Hive half of the listing. Hive databases live in
+    ``spark_catalog`` for the data-plane SQL paths (Delta/Hive backed by HMS),
+    but the listing itself does not need a Spark session — HMS is the source
+    of truth. Returns flat names (e.g., ``u_alice__demo``).
+
+    A Thrift failure (HMS unreachable, etc.) is logged and returns an empty
+    list so the Iceberg listing still surfaces.
     """
     try:
-        rows = spark.sql("SHOW DATABASES IN spark_catalog").collect()
-        return sorted(row["namespace"] for row in rows)
+        return sorted(hive_metastore.get_databases(settings=get_settings()))
     except Exception as e:
         logger.warning(f"Failed to list Hive databases: {e}")
         return []
@@ -197,7 +200,7 @@ def get_databases(
         except Exception as e:
             logger.warning(f"Failed to list namespaces in catalog '{catalog}': {e}")
 
-    databases.extend(_list_hive_databases(spark))
+    databases.extend(_list_hive_databases())
 
     if filter_by_namespace:
         if settings is None:
