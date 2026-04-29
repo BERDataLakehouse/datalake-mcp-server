@@ -113,6 +113,9 @@ services:
       # DATA GOVERNANCE CONFIGURATION
       - GOVERNANCE_API_URL=http://minio-manager-service:8000
 
+      # POLARIS CONFIGURATION (per-user credentials provisioned dynamically)
+      - POLARIS_CATALOG_URI=http://polaris:8181/api/catalog
+
       # TRINO CONFIGURATION
       - TRINO_HOST=trino
       - TRINO_PORT=8080
@@ -123,15 +126,28 @@ services:
       timeout: 5s
       retries: 10
     depends_on:
-      - spark-master
-      - spark-connect-notebook
-      - standalone-spark-master
-      - hive-metastore
-      - minio
-      - minio-manager-service
-      - postgres
-      - redis
-      - trino
+      spark-master:
+        condition: service_healthy
+      spark-connect-notebook:
+        condition: service_healthy
+      standalone-spark-master:
+        condition: service_healthy
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      minio-manager-service:
+        condition: service_healthy
+      polaris:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      trino:
+        condition: service_healthy
 
   # =========================================================================
   # SPARK CONNECT NOTEBOOK (dedicated cluster for CONNECT_USER)
@@ -160,15 +176,27 @@ services:
       - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
       - USER=${CONNECT_USER}
-    # Start ONLY Spark Connect server (user's dedicated cluster)
-    # BERDL_ALLOWED_NAMESPACE_PREFIXES is computed from USER env var at startup,
-    # matching the production behavior in connect_server.py
+      # KBaseAuthServerInterceptor needs this to validate per-request KBase tokens
+      # (matches spark_notebook production: configs/spark-defaults.conf.template).
+      - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
+    # Start ONLY Spark Connect server (user's dedicated cluster).
+    # Configs here mirror spark_notebook production
+    # (configs/spark-defaults.conf.template + connect_server.py):
+    # - Iceberg + Delta + Sedona extensions side-by-side
+    # - Polaris REST catalogs registered at startup (Spark Connect requires this:
+    #   spark.sql.catalog.<name>.* configs are immutable post-startup, so the
+    #   user's notebook pod registers per-user catalogs at boot in production.
+    #   For docker-compose we use Polaris root creds and register both
+    #   CONNECT_USER's personal catalog ("my" + short-username alias) and the
+    #   shared "globalusers" tenant catalog.)
+    # - KBaseAuthServerInterceptor for per-request KBase token validation
+    # - Hive metastore version/jars overrides intentionally NOT set (production
+    #   commented those out: forcing 4.0.0 selects Shim_v4_0 which throws
+    #   NoSuchMethodException against the bundled Hive 2.3 jars)
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         /opt/scripts/check_env.sh &&
-        export BERDL_ALLOWED_NAMESPACE_PREFIXES="u_$${USER}__,globalusers_" &&
-        echo "Namespace prefixes for $${USER}: $$BERDL_ALLOWED_NAMESPACE_PREFIXES" &&
         $$SPARK_HOME/sbin/start-connect-server.sh \
           --master local[4] \
           --conf spark.driver.host=spark-connect-notebook \
@@ -179,14 +207,49 @@ services:
           --conf spark.hadoop.fs.s3a.path.style.access=true \
           --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
           --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
-          --conf hive.metastore.uris=thrift://hive-metastore:9083 \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
           --conf spark.sql.catalogImplementation=hive \
-          --conf spark.sql.hive.metastore.version=4.0.0 \
-          --conf spark.sql.hive.metastore.jars=path \
-          --conf spark.sql.hive.metastore.jars.path=/usr/local/spark/jars/* \
-          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.sedona.sql.SedonaSqlExtensions \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.apache.sedona.sql.SedonaSqlExtensions \
           --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
-          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.NamespaceValidationInterceptor &&
+          --conf spark.databricks.delta.retentionDurationCheck.enabled=false \
+          --conf spark.connect.session.manager.defaultSessionTimeout=10h \
+          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.KBaseAuthServerInterceptor \
+          --conf spark.sql.catalog.my=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.my.type=rest \
+          --conf spark.sql.catalog.my.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.my.credential=root:s3cr3t \
+          --conf spark.sql.catalog.my.warehouse=user_$${USER} \
+          --conf spark.sql.catalog.my.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.my.token-refresh-enabled=false \
+          --conf spark.sql.catalog.my.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.my.s3.access-key-id=minio \
+          --conf spark.sql.catalog.my.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.my.s3.path-style-access=true \
+          --conf spark.sql.catalog.my.s3.region=us-east-1 \
+          --conf spark.sql.catalog.$${USER}=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.$${USER}.type=rest \
+          --conf spark.sql.catalog.$${USER}.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.$${USER}.credential=root:s3cr3t \
+          --conf spark.sql.catalog.$${USER}.warehouse=user_$${USER} \
+          --conf spark.sql.catalog.$${USER}.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.$${USER}.token-refresh-enabled=false \
+          --conf spark.sql.catalog.$${USER}.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.$${USER}.s3.access-key-id=minio \
+          --conf spark.sql.catalog.$${USER}.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.$${USER}.s3.path-style-access=true \
+          --conf spark.sql.catalog.$${USER}.s3.region=us-east-1 \
+          --conf spark.sql.catalog.globalusers=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.globalusers.type=rest \
+          --conf spark.sql.catalog.globalusers.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.globalusers.credential=root:s3cr3t \
+          --conf spark.sql.catalog.globalusers.warehouse=tenant_globalusers \
+          --conf spark.sql.catalog.globalusers.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.globalusers.token-refresh-enabled=false \
+          --conf spark.sql.catalog.globalusers.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.globalusers.s3.access-key-id=minio \
+          --conf spark.sql.catalog.globalusers.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.globalusers.s3.path-style-access=true \
+          --conf spark.sql.catalog.globalusers.s3.region=us-east-1 &&
         tail -f /dev/null
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/15002'"]
@@ -196,9 +259,14 @@ services:
     volumes:
       - ./configs/hive-site.xml:/usr/local/spark/conf/hive-site.xml:ro
     depends_on:
-      - hive-metastore
-      - minio
-      - redis
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     networks:
       default:
         aliases:
@@ -239,9 +307,14 @@ services:
     volumes:
       - ./configs/hive-site.xml:/usr/local/spark/conf/hive-site.xml:ro
     depends_on:
-      - hive-metastore
-      - minio
-      - redis
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   standalone-spark-worker:
     # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
@@ -271,7 +344,8 @@ services:
       timeout: 5s
       retries: 10
     depends_on:
-      - standalone-spark-master
+      standalone-spark-master:
+        condition: service_healthy
 
   minio-manager-service:
     # image: ghcr.io/berdatalakehouse/minio_manager_service:main
@@ -289,6 +363,9 @@ services:
       - KBASE_ADMIN_ROLES=CDM_JUPYTERHUB_ADMIN
       - KBASE_APPROVED_ROLES=BERDL_USER
       - REDIS_URL=redis://redis:6379
+      # Polaris admin credentials (only the governance service needs root access)
+      - POLARIS_CATALOG_URI=http://polaris:8181/api/catalog
+      - POLARIS_CREDENTIAL=root:s3cr3t
       # Credential store (PostgreSQL)
       - MMS_DB_HOST=postgres
       - MMS_DB_PORT=5432
@@ -296,10 +373,28 @@ services:
       - MMS_DB_USER=mms
       - MMS_DB_PASSWORD=mmspassword
       - MMS_DB_ENCRYPTION_KEY=change-me-in-prod
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
-      - minio
-      - redis
-      - postgres
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      polaris:
+        condition: service_healthy
 
   spark-master:
     # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
@@ -324,16 +419,17 @@ services:
       - BERDL_DELTALAKE_WAREHOUSE_DIRECTORY_PATH=s3a://cdm-lake/users-sql-warehouse
       - BERDL_HIVE_METASTORE_URI=thrift://hive-metastore:9083
       - USER=${STANDALONE_USER}
-    # Override entrypoint to start both Spark Master AND Spark Connect server
-    # The default entrypoint only starts Spark Master, but MCP server needs Spark Connect
-    # BERDL_ALLOWED_NAMESPACE_PREFIXES is computed from USER env var at startup,
-    # matching the production behavior in connect_server.py
+      # KBaseAuthServerInterceptor needs this to validate per-request KBase tokens
+      # (matches spark_notebook production: configs/spark-defaults.conf.template).
+      - KBASE_AUTH_URL=https://ci.kbase.us/services/auth/
+    # Override entrypoint to start both Spark Master AND Spark Connect server.
+    # The default entrypoint only starts Spark Master, but MCP server needs Spark Connect.
+    # Configs mirror spark_notebook production (see spark-connect-notebook above),
+    # including Polaris catalogs registered at startup with root creds.
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         /opt/scripts/check_env.sh &&
-        export BERDL_ALLOWED_NAMESPACE_PREFIXES="u_$${USER}__,globalusers_" &&
-        echo "Namespace prefixes for $${USER}: $$BERDL_ALLOWED_NAMESPACE_PREFIXES" &&
         $$SPARK_HOME/sbin/start-master.sh &&
         sleep 10 &&
         $$SPARK_HOME/sbin/start-connect-server.sh \
@@ -346,14 +442,49 @@ services:
           --conf spark.hadoop.fs.s3a.path.style.access=true \
           --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
           --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
-          --conf hive.metastore.uris=thrift://hive-metastore:9083 \
+          --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
           --conf spark.sql.catalogImplementation=hive \
-          --conf spark.sql.hive.metastore.version=4.0.0 \
-          --conf spark.sql.hive.metastore.jars=path \
-          --conf spark.sql.hive.metastore.jars.path=/usr/local/spark/jars/* \
-          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.sedona.sql.SedonaSqlExtensions \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension,org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.apache.sedona.sql.SedonaSqlExtensions \
           --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
-          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.NamespaceValidationInterceptor &&
+          --conf spark.databricks.delta.retentionDurationCheck.enabled=false \
+          --conf spark.connect.session.manager.defaultSessionTimeout=10h \
+          --conf spark.connect.grpc.interceptor.classes=us.kbase.spark.KBaseAuthServerInterceptor \
+          --conf spark.sql.catalog.my=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.my.type=rest \
+          --conf spark.sql.catalog.my.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.my.credential=root:s3cr3t \
+          --conf spark.sql.catalog.my.warehouse=user_$${USER} \
+          --conf spark.sql.catalog.my.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.my.token-refresh-enabled=false \
+          --conf spark.sql.catalog.my.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.my.s3.access-key-id=minio \
+          --conf spark.sql.catalog.my.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.my.s3.path-style-access=true \
+          --conf spark.sql.catalog.my.s3.region=us-east-1 \
+          --conf spark.sql.catalog.$${USER}=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.$${USER}.type=rest \
+          --conf spark.sql.catalog.$${USER}.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.$${USER}.credential=root:s3cr3t \
+          --conf spark.sql.catalog.$${USER}.warehouse=user_$${USER} \
+          --conf spark.sql.catalog.$${USER}.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.$${USER}.token-refresh-enabled=false \
+          --conf spark.sql.catalog.$${USER}.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.$${USER}.s3.access-key-id=minio \
+          --conf spark.sql.catalog.$${USER}.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.$${USER}.s3.path-style-access=true \
+          --conf spark.sql.catalog.$${USER}.s3.region=us-east-1 \
+          --conf spark.sql.catalog.globalusers=org.apache.iceberg.spark.SparkCatalog \
+          --conf spark.sql.catalog.globalusers.type=rest \
+          --conf spark.sql.catalog.globalusers.uri=http://polaris:8181/api/catalog \
+          --conf spark.sql.catalog.globalusers.credential=root:s3cr3t \
+          --conf spark.sql.catalog.globalusers.warehouse=tenant_globalusers \
+          --conf spark.sql.catalog.globalusers.scope=PRINCIPAL_ROLE:ALL \
+          --conf spark.sql.catalog.globalusers.token-refresh-enabled=false \
+          --conf spark.sql.catalog.globalusers.s3.endpoint=http://minio:9002 \
+          --conf spark.sql.catalog.globalusers.s3.access-key-id=minio \
+          --conf spark.sql.catalog.globalusers.s3.secret-access-key=minio123 \
+          --conf spark.sql.catalog.globalusers.s3.path-style-access=true \
+          --conf spark.sql.catalog.globalusers.s3.region=us-east-1 &&
         tail -f /dev/null
     volumes:
       # Mount hive-site.xml for HMS client configuration
@@ -397,7 +528,8 @@ services:
       timeout: 5s
       retries: 10
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
 
   spark-worker-2:
     # image: ghcr.io/berdatalakehouse/kube_spark_manager_image:main
@@ -427,7 +559,8 @@ services:
       timeout: 5s
       retries: 10
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
 
   hive-metastore:
     # image: ghcr.io/berdatalakehouse/hive_metastore:main
@@ -460,8 +593,12 @@ services:
       # Override default hive-site.xml template to enable S3 warehouse directory
       - ./configs/hive-metastore-site.xml:/opt/hive/conf/hive-site.xml.template:ro
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9083'"]
       interval: 10s
@@ -481,7 +618,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-postgres-readonly.sh:/docker-entrypoint-initdb.d/01-init-readonly.sh:ro
-      - ./scripts/init-mms-db.sh:/docker-entrypoint-initdb.d/02-init-mms-db.sh:ro
+      - ./scripts/init-polaris-db.sh:/docker-entrypoint-initdb.d/02-init-polaris-db.sh:ro
+      - ./scripts/init-mms-db.sh:/docker-entrypoint-initdb.d/03-init-mms-db.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hive"]
       interval: 5s
@@ -534,11 +672,89 @@ services:
       echo 'MinIO configuration complete.';
       "
 
+  polaris-db-init:
+    image: postgres:16.3
+    environment:
+      - PGPASSWORD=hivepassword
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        if psql -h postgres -U hive -d hive -tAc "SELECT 1 FROM pg_database WHERE datname = 'polaris'" | grep -q 1; then
+          echo "Polaris database already exists"
+        else
+          psql -h postgres -U hive -d hive -c "CREATE DATABASE polaris"
+          echo "Polaris database created"
+        fi
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:latest
+    environment:
+      - POLARIS_PERSISTENCE_TYPE=relational-jdbc
+      - QUARKUS_DATASOURCE_DB_KIND=postgresql
+      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://postgres:5432/polaris
+      - QUARKUS_DATASOURCE_USERNAME=hive
+      - QUARKUS_DATASOURCE_PASSWORD=hivepassword
+    # Bootstrap exits 3 if the metastore is already bootstrapped (expected with persistent storage).
+    # Treat exit 3 as success so docker compose doesn't fail on subsequent runs.
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        output=$$(java -jar /deployments/polaris-admin-tool.jar bootstrap --realm=POLARIS --credential=POLARIS,root,s3cr3t 2>&1)
+        rc=$$?
+        printf '%s\n' "$$output"
+        if [ $$rc -eq 3 ]; then
+          if printf '%s\n' "$$output" | grep -Eqi "already.*bootstrapped"; then
+            echo "Already bootstrapped - skipping (OK)"
+            exit 0
+          fi
+        fi
+        exit $$rc
+    depends_on:
+      polaris-db-init:
+        condition: service_completed_successfully
+
+  polaris:
+    image: apache/polaris:latest
+    ports:
+      - "8183:8181"  # Polaris API (use 8183 on host to avoid conflicts)
+    environment:
+      # Persistence — PostgreSQL instead of in-memory
+      - POLARIS_PERSISTENCE_TYPE=relational-jdbc
+      - QUARKUS_DATASOURCE_DB_KIND=postgresql
+      - QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://postgres:5432/polaris
+      - QUARKUS_DATASOURCE_USERNAME=hive
+      - QUARKUS_DATASOURCE_PASSWORD=hivepassword
+      # Realm configuration
+      - POLARIS_REALM_NAME=default-realm
+      # MinIO credentials for Polaris's own S3 access (metadata files).
+      # Polaris reads endpointInternal + pathStyleAccess from each catalog's storageConfigInfo.
+      # STS is disabled per-catalog via stsUnavailable:true (not the global SKIP_CREDENTIAL flag).
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=minio
+      - AWS_SECRET_ACCESS_KEY=minio123
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8182/q/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      polaris-bootstrap:
+        condition: service_completed_successfully
+
   redis:
     image: redis:7-alpine
     ports:
       - "6380:6379"  # Use 6380 on host to avoid conflicts with local Redis
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     volumes:
       - redis_data:/data
 
@@ -565,9 +781,16 @@ services:
       - ./configs/trino/resource-groups.properties:/etc/trino/resource-groups.properties
       - ./configs/trino/resource-groups.json:/etc/trino/resource-groups.json
     depends_on:
-      - hive-metastore
-      - minio
-      - minio-manager-service
+      hive-metastore:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      minio-manager-service:
+        condition: service_healthy
+      polaris:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/v1/info"]
       interval: 30s
