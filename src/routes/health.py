@@ -106,13 +106,20 @@ def _check_hive_metastore() -> bool | str:
         "Redis and Hive Metastore Thrift connection."
     ),
 )
-async def health_check():
+def health_check():
     """
     Health check that verifies connectivity to all backend services.
 
+    Declared as sync ``def`` (not ``async def``) so FastAPI runs it in the
+    AnyIO threadpool. The component checks (Redis ping, Hive Metastore
+    Thrift) are blocking I/O — running them on the event loop would freeze
+    every other async operation (auth middleware, request timeout
+    bookkeeping, response delivery for in-flight sync routes) for the
+    duration of the I/O. With sync ``def`` the event loop stays free.
+
     Checks:
     - Redis (caching)
-    - Hive Metastore (Thrift connection)
+    - Hive Metastore (Thrift connection, bounded by HMS socket timeout)
     """
     components = [
         _timed_check("redis", _check_redis),

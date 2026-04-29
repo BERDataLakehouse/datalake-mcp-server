@@ -19,28 +19,38 @@ class TestGetHiveMetastoreClient:
         settings = MagicMock()
         settings.BERDL_HIVE_METASTORE_URI = "thrift://hive-metastore:9083"
 
-        with patch("src.delta_lake.hive_metastore.HMSClient") as mock_hms:
-            mock_client = MagicMock()
-            mock_hms.return_value = mock_client
+        with (
+            patch("src.delta_lake.hive_metastore.TSocket.TSocket") as mock_tsocket,
+            patch("src.delta_lake.hive_metastore.TTransport.TBufferedTransport"),
+            patch("src.delta_lake.hive_metastore.TBinaryProtocol.TBinaryProtocol"),
+            patch("src.delta_lake.hive_metastore.HMSClient") as mock_hms,
+        ):
+            mock_socket = MagicMock()
+            mock_tsocket.return_value = mock_socket
+            mock_hms.return_value = MagicMock()
 
-            result = get_hive_metastore_client(settings)
+            get_hive_metastore_client(settings)
 
-            mock_hms.assert_called_once_with(host="hive-metastore", port=9083)
-            assert result == mock_client
+            mock_tsocket.assert_called_once_with("hive-metastore", 9083)
+            mock_socket.setTimeout.assert_called_once()  # bounded socket
+            assert mock_hms.called
 
     def test_valid_thrift_uri_without_port(self):
         """Test parsing a valid thrift URI without port (uses default 9083)."""
         settings = MagicMock()
         settings.BERDL_HIVE_METASTORE_URI = "thrift://hive-metastore"
 
-        with patch("src.delta_lake.hive_metastore.HMSClient") as mock_hms:
-            mock_client = MagicMock()
-            mock_hms.return_value = mock_client
+        with (
+            patch("src.delta_lake.hive_metastore.TSocket.TSocket") as mock_tsocket,
+            patch("src.delta_lake.hive_metastore.TTransport.TBufferedTransport"),
+            patch("src.delta_lake.hive_metastore.TBinaryProtocol.TBinaryProtocol"),
+            patch("src.delta_lake.hive_metastore.HMSClient"),
+        ):
+            mock_tsocket.return_value = MagicMock()
 
-            result = get_hive_metastore_client(settings)
+            get_hive_metastore_client(settings)
 
-            mock_hms.assert_called_once_with(host="hive-metastore", port=9083)
-            assert result == mock_client
+            mock_tsocket.assert_called_once_with("hive-metastore", 9083)
 
     def test_invalid_uri_format(self):
         """Test that invalid URI format raises ValueError."""
@@ -58,14 +68,17 @@ class TestGetHiveMetastoreClient:
         settings = MagicMock()
         settings.BERDL_HIVE_METASTORE_URI = "thrift://custom-host:19083"
 
-        with patch("src.delta_lake.hive_metastore.HMSClient") as mock_hms:
-            mock_client = MagicMock()
-            mock_hms.return_value = mock_client
+        with (
+            patch("src.delta_lake.hive_metastore.TSocket.TSocket") as mock_tsocket,
+            patch("src.delta_lake.hive_metastore.TTransport.TBufferedTransport"),
+            patch("src.delta_lake.hive_metastore.TBinaryProtocol.TBinaryProtocol"),
+            patch("src.delta_lake.hive_metastore.HMSClient"),
+        ):
+            mock_tsocket.return_value = MagicMock()
 
-            result = get_hive_metastore_client(settings)
+            get_hive_metastore_client(settings)
 
-            mock_hms.assert_called_once_with(host="custom-host", port=19083)
-            assert result == mock_client
+            mock_tsocket.assert_called_once_with("custom-host", 19083)
 
 
 class TestGetDatabases:

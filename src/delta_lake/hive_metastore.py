@@ -11,16 +11,24 @@ MAINTENANCE NOTE: This file is copied from:
 When updating, copy the relevant functions from those files.
 """
 
+import os
 from typing import List
 
 from hmsclient import HMSClient
+from thrift.protocol import TBinaryProtocol
+from thrift.transport import TSocket, TTransport
 
 from src.settings import BERDLSettings
+
+# Bound the HMS Thrift socket so a slow / unreachable metastore can never
+# pin a thread (or block the /health check) indefinitely. The default HMS
+# call latency is sub-millisecond when healthy; 10s is a generous ceiling.
+_HMS_SOCKET_TIMEOUT_MS = int(os.getenv("HMS_SOCKET_TIMEOUT_MS", "10000"))
 
 
 def get_hive_metastore_client(settings: BERDLSettings) -> HMSClient:
     """
-    Get Hive Metastore client configured from settings.
+    Get Hive Metastore client configured from settings, with a bounded socket timeout.
 
     Args:
         settings: BERDLSettings instance with HMS configuration
@@ -47,7 +55,15 @@ def get_hive_metastore_client(settings: BERDLSettings) -> HMSClient:
         host = host_port
         port = 9083  # Default HMS port
 
-    return HMSClient(host=host, port=port)
+    # Build the transport explicitly so we can set a socket-level timeout.
+    # HMSClient(host=..., port=...) constructs the same TBufferedTransport +
+    # TBinaryProtocol stack but with no timeout, which means open() and any
+    # subsequent call can block forever on a slow / unresponsive metastore.
+    sock = TSocket.TSocket(host, port)
+    sock.setTimeout(_HMS_SOCKET_TIMEOUT_MS)
+    transport = TTransport.TBufferedTransport(sock)
+    protocol = TBinaryProtocol.TBinaryProtocol(transport)
+    return HMSClient(iprot=protocol)
 
 
 def get_databases(settings: BERDLSettings) -> List[str]:
