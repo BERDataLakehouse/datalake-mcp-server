@@ -675,10 +675,9 @@ def get_spark_context(
                 f"short-circuiting before session creation."
             )
             raise SparkConnectUnavailableError(
-                f"Spark Connect server for user '{username}' was unresponsive "
-                f"to a SQL probe within the last "
-                f"{int(sc_health.SC_UNHEALTHY_TTL)}s. The notebook pod's JVM "
-                f"driver is likely deadlocked — restart the notebook to recover."
+                f"Spark Connect server for user '{username}' is wedged: a "
+                f"recent SELECT 1 probe failed. Restart your notebook pod "
+                f"to recover."
             )
 
         # Session creation phase - exceptions here trigger fallback to Standalone
@@ -744,11 +743,8 @@ def get_spark_context(
                 raise SparkConnectUnavailableError(
                     f"Spark Connect server for user '{username}' accepted a "
                     f"session but did not respond to a SELECT 1 probe within "
-                    f"{int(_SC_PROBE_TIMEOUT_SECONDS)}s. The notebook pod's "
-                    f"JVM driver is likely deadlocked — restart the notebook "
-                    f"to recover. Subsequent requests for the next "
-                    f"{int(sc_health.SC_UNHEALTHY_TTL)}s will short-circuit "
-                    f"with this error."
+                    f"{int(_SC_PROBE_TIMEOUT_SECONDS)}s. Restart your "
+                    f"notebook pod to recover."
                 )
 
         # Yield phase - OUTSIDE the try/except so route execution errors propagate
