@@ -439,12 +439,23 @@ def _filter_immutable_spark_connect_configs(config: dict[str, str]) -> dict[str,
     return {k: v for k, v in config.items() if not _is_immutable_config(k)}
 
 
+def _redact_spark_remote(remote: str | None) -> str:
+    """Redact bearer-like Spark Connect URL parameters before logging."""
+    if not remote:
+        return "N/A"
+    return re.sub(r"(;x-kbase-token=)[^;]+", r"\1<redacted>", remote)
+
+
 def _warm_polaris_catalogs(spark: SparkSession, settings: BERDLSettings) -> None:
     """
     Touch Spark Connect Polaris catalogs so they are visible in SHOW CATALOGS.
 
     Spark lazily initializes REST catalog plugins. Accessing each configured
     alias once registers the server-side catalog with the session.
+
+    This is intentionally not called during MCP request setup. The MCP data
+    store discovers catalogs from Spark config instead, and eager SQL here can
+    block a request worker before the route body runs.
     """
     catalog_aliases: list[str] = []
     catalog_aliases.extend(
@@ -799,7 +810,8 @@ def get_spark_session(
             # Note: This only applies to remote Spark Connect, not local sessions.
             logger.info(
                 f"Creating Spark Connect session using create() "
-                f"(app_name={app_name}, remote={config.get('spark.remote', 'N/A')})"
+                f"(app_name={app_name}, "
+                f"remote={_redact_spark_remote(config.get('spark.remote'))})"
             )
             spark = builder.config(conf=spark_conf).create()
 
@@ -823,13 +835,6 @@ def get_spark_session(
     # This can be done outside the lock as it operates on the session instance
     if not local and not use_spark_connect:
         _set_scheduler_pool(spark, scheduler_pool)
-
-    if use_spark_connect and not local:
-        effective_settings = settings
-        if effective_settings is None:
-            get_settings.cache_clear()
-            effective_settings = get_settings()
-        _warm_polaris_catalogs(spark, effective_settings)
 
     return spark
 

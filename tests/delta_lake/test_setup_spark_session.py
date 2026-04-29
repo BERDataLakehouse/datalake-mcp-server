@@ -29,6 +29,7 @@ from src.delta_lake.setup_spark_session import (
     _get_s3_conf,
     _get_catalog_conf,
     _filter_immutable_spark_connect_configs,
+    _redact_spark_remote,
     _set_scheduler_pool,
     _clear_spark_env_for_mode_switch,
     _clear_stale_spark_connect_sessions,
@@ -600,6 +601,21 @@ class TestFilterImmutableSparkConnectConfigs:
         assert "spark.eventLog.dir" in IMMUTABLE_CONFIGS
 
 
+class TestRedactSparkRemote:
+    """Tests for safe Spark Connect URL logging."""
+
+    def test_redacts_kbase_token(self):
+        remote = "sc://spark-notebook:15002/;x-kbase-token=secret-token"
+
+        assert (
+            _redact_spark_remote(remote)
+            == "sc://spark-notebook:15002/;x-kbase-token=<redacted>"
+        )
+
+    def test_handles_missing_remote(self):
+        assert _redact_spark_remote(None) == "N/A"
+
+
 # =============================================================================
 # Test _set_scheduler_pool
 # =============================================================================
@@ -1015,6 +1031,33 @@ class TestGetSparkSession:
                     )
 
                     mock_set_pool.assert_not_called()
+
+    def test_skips_polaris_warmup_in_connect_mode(self, test_settings):
+        """Spark Connect sessions should not run eager catalog SQL during setup."""
+        mock_session = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.config.return_value = mock_builder
+        mock_builder.create.return_value = mock_session
+
+        with patch(
+            "src.delta_lake.setup_spark_session.SparkSession"
+        ) as mock_spark_class:
+            mock_spark_class.builder = mock_builder
+
+            with patch(
+                "src.delta_lake.setup_spark_session._clear_spark_env_for_mode_switch"
+            ):
+                with patch(
+                    "src.delta_lake.setup_spark_session._warm_polaris_catalogs"
+                ) as mock_warm:
+                    get_spark_session(
+                        app_name="TestSession",
+                        local=False,
+                        settings=test_settings,
+                        use_spark_connect=True,
+                    )
+
+                    mock_warm.assert_not_called()
 
     def test_uses_spark_conf_with_load_defaults_false(self, test_settings):
         """Test that SparkConf is created with loadDefaults=False."""

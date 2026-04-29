@@ -7,6 +7,8 @@ import os
 import random
 import re
 import socket
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Generator
@@ -194,6 +196,35 @@ def fetch_user_minio_credentials(
     return access_key, secret_key
 
 
+# Per-user in-process cache for Polaris credentials.
+#
+# POST /polaris/user_provision/{username} is a provisioning call: idempotent but
+# multi-step (DB + Polaris HTTP) even on a hit. Calling it on every request
+# forces every datalake-mcp-server request to wait on MMS, which caps throughput
+# at well under 1k RPS and wedges the threadpool when MMS is slow. Polaris
+# credentials are stable per-user until explicit rotation, so we cache the
+# response in-process with a TTL and coalesce concurrent fetches per user.
+_POLARIS_CRED_CACHE_TTL = int(os.getenv("POLARIS_CRED_CACHE_TTL", "900"))
+_polaris_cred_cache: dict[str, tuple[float, dict[str, str] | None]] = {}
+_polaris_cred_cache_lock = threading.Lock()
+_polaris_per_user_locks: dict[str, threading.Lock] = {}
+
+
+def _get_polaris_user_lock(username: str) -> threading.Lock:
+    with _polaris_cred_cache_lock:
+        lock = _polaris_per_user_locks.get(username)
+        if lock is None:
+            lock = threading.Lock()
+            _polaris_per_user_locks[username] = lock
+        return lock
+
+
+def invalidate_polaris_credentials(username: str) -> None:
+    """Drop a user's cached Polaris credentials (e.g. after explicit rotation)."""
+    with _polaris_cred_cache_lock:
+        _polaris_cred_cache.pop(username, None)
+
+
 def fetch_user_polaris_credentials(
     governance_api_url: str,
     username: str,
@@ -206,7 +237,32 @@ def fetch_user_polaris_credentials(
     POST /polaris/user_provision/{username}. The Governance API reuses cached
     credentials server-side and returns the personal and tenant Polaris catalogs
     the user can access.
+
+    Results are cached in-process per-user for ``POLARIS_CRED_CACHE_TTL`` seconds
+    to keep this off the per-request hot path.
     """
+    cached = _polaris_cred_cache.get(username)
+    if cached and (time.monotonic() - cached[0]) < _POLARIS_CRED_CACHE_TTL:
+        return cached[1]
+
+    user_lock = _get_polaris_user_lock(username)
+    with user_lock:
+        cached = _polaris_cred_cache.get(username)
+        if cached and (time.monotonic() - cached[0]) < _POLARIS_CRED_CACHE_TTL:
+            return cached[1]
+
+        result = _fetch_user_polaris_credentials_uncached(
+            governance_api_url, username, auth_token
+        )
+        _polaris_cred_cache[username] = (time.monotonic(), result)
+        return result
+
+
+def _fetch_user_polaris_credentials_uncached(
+    governance_api_url: str,
+    username: str,
+    auth_token: str,
+) -> dict[str, str] | None:
     safe_username = quote(username, safe="")
     url = (
         f"{str(governance_api_url).rstrip('/')}/polaris/user_provision/{safe_username}"
