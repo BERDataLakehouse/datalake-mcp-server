@@ -124,6 +124,7 @@ def list_databases(
         databases = run_in_spark_process(
             list_databases_subprocess,
             ctx.settings_dict,
+            filter_by_namespace=body.filter_by_namespace,
             app_name=ctx.app_name,
             operation_name="list_databases",
         )
@@ -133,6 +134,8 @@ def list_databases(
             data_store.get_databases(
                 spark=ctx.spark,
                 return_json=False,
+                filter_by_namespace=body.filter_by_namespace,
+                settings=ctx.settings_dict,
             ),
         )
 
@@ -277,6 +280,7 @@ def get_database_structure(
                 return_json=False,
                 filter_by_namespace=request.filter_by_namespace,
                 auth_token=auth_token,
+                settings=ctx.settings_dict,
             ),
         )
     return DatabaseStructureResponse(structure=structure)

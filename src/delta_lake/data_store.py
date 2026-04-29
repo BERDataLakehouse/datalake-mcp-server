@@ -21,6 +21,11 @@ from typing import Any, Dict, List, Optional, Union
 
 from pyspark.sql import SparkSession
 
+from src.delta_lake.setup_spark_session import (
+    _get_personal_catalog_aliases,
+    _get_tenant_catalog_alias,
+)
+
 logger = logging.getLogger(__name__)
 
 # Catalogs to exclude from Iceberg listing (non-Iceberg catalogs)
@@ -62,6 +67,67 @@ def _list_iceberg_catalogs(spark: SparkSession) -> List[str]:
     return sorted(c for c in catalog_names if c not in _EXCLUDED_CATALOGS)
 
 
+def _settings_get(settings: Any, key: str) -> Any:
+    """Read ``key`` from a BERDLSettings instance or a dict."""
+    if isinstance(settings, dict):
+        return settings.get(key)
+    return getattr(settings, key, None)
+
+
+def _aliases_for_user(settings: Any) -> tuple[set[str], set[str]]:
+    """Return ``(personal_aliases, tenant_aliases)`` for the current user.
+
+    Personal aliases include ``my`` plus the sanitized stripped form of
+    ``POLARIS_PERSONAL_CATALOG`` (e.g. ``user_alice`` → ``alice``). Tenant
+    aliases are derived from each entry of ``POLARIS_TENANT_CATALOGS`` with
+    the ``tenant_`` prefix stripped (e.g. ``tenant_globalusers`` →
+    ``globalusers``).
+    """
+    personal = set(
+        _get_personal_catalog_aliases(
+            _settings_get(settings, "POLARIS_PERSONAL_CATALOG")
+        )
+    )
+    tenant: set[str] = set()
+    raw_tenants = _settings_get(settings, "POLARIS_TENANT_CATALOGS")
+    if raw_tenants:
+        for cat in str(raw_tenants).split(","):
+            cat = cat.strip()
+            if cat:
+                tenant.add(_get_tenant_catalog_alias(cat))
+    return personal, tenant
+
+
+def _filter_to_user_namespaces(
+    databases: List[str],
+    username: str,
+    personal_aliases: set[str],
+    tenant_aliases: set[str],
+) -> List[str]:
+    """Filter ``databases`` to those owned by the user or accessible via tenants.
+
+    Iceberg ``catalog.namespace`` entries are kept when the catalog matches
+    the user's personal aliases or one of their tenant aliases. Hive flat
+    names (Delta) are kept when they start with ``u_{username}__`` (own
+    personal) or ``{tenant}_`` for any tenant the user belongs to.
+    """
+    user_prefix = f"u_{username}__"
+    allowed_catalogs = personal_aliases | tenant_aliases
+
+    result: List[str] = []
+    for db in databases:
+        if "." in db:
+            catalog = db.split(".", 1)[0]
+            if catalog in allowed_catalogs:
+                result.append(db)
+        else:
+            if db.startswith(user_prefix):
+                result.append(db)
+            elif any(db.startswith(f"{t}_") for t in tenant_aliases):
+                result.append(db)
+    return result
+
+
 def _list_hive_databases(spark: SparkSession) -> List[str]:
     """List Hive databases registered under spark_catalog (Delta tables).
 
@@ -83,6 +149,8 @@ def _list_hive_databases(spark: SparkSession) -> List[str]:
 def get_databases(
     spark: Optional[SparkSession] = None,
     return_json: bool = True,
+    filter_by_namespace: bool = True,
+    settings: Optional[Any] = None,
 ) -> Union[str, List[str]]:
     """
     List all accessible databases across Iceberg and Hive catalogs.
@@ -96,13 +164,21 @@ def get_databases(
     Args:
         spark: SparkSession to use (required in MCP server context)
         return_json: Whether to return JSON string or raw list
+        filter_by_namespace: Defaults to True — restrict the returned list to
+            databases owned by the current user or accessible via the user's
+            tenant catalogs. Requires ``settings`` with ``USER``,
+            ``POLARIS_PERSONAL_CATALOG``, and ``POLARIS_TENANT_CATALOGS``
+            populated (BERDLSettings instance or dict). Pass False to bypass
+            filtering (e.g. for admin tooling).
+        settings: Per-user settings used for namespace filtering.
 
     Returns:
         Sorted list of database identifiers (Iceberg ``catalog.namespace`` and
         Hive flat names interleaved)
 
     Raises:
-        ValueError: If spark is not provided
+        ValueError: If spark is not provided, or if ``filter_by_namespace`` is
+            True but ``settings`` lacks the required identity fields.
     """
     if spark is None:
         raise ValueError(
@@ -122,6 +198,15 @@ def get_databases(
             logger.warning(f"Failed to list namespaces in catalog '{catalog}': {e}")
 
     databases.extend(_list_hive_databases(spark))
+
+    if filter_by_namespace:
+        if settings is None:
+            raise ValueError("settings must be provided when filter_by_namespace=True")
+        username = _settings_get(settings, "USER")
+        if not username:
+            raise ValueError("settings.USER must be set when filter_by_namespace=True")
+        personal, tenant = _aliases_for_user(settings)
+        databases = _filter_to_user_namespaces(databases, username, personal, tenant)
 
     return _format_output(sorted(databases), return_json)
 
@@ -204,7 +289,7 @@ def get_db_structure(
     spark: Optional[SparkSession] = None,
     with_schema: bool = False,
     return_json: bool = True,
-    filter_by_namespace: bool = False,
+    filter_by_namespace: bool = True,
     auth_token: Optional[str] = None,
     settings: Optional[Any] = None,
 ) -> Union[str, Dict]:
@@ -245,7 +330,12 @@ def get_db_structure(
             "SparkSession must be provided. In MCP server context, use FastAPI dependency injection."
         )
 
-    databases = get_databases(spark=spark, return_json=False)
+    databases = get_databases(
+        spark=spark,
+        return_json=False,
+        filter_by_namespace=filter_by_namespace,
+        settings=settings,
+    )
 
     db_structure: Dict[str, Any] = {}
     for db in databases:
@@ -267,8 +357,16 @@ def database_exists(
     database: str,
     spark: Optional[SparkSession] = None,
 ) -> bool:
-    """Check if a database (catalog.namespace) exists."""
-    return database in get_databases(spark=spark, return_json=False)
+    """Check if a database physically exists (no namespace filtering).
+
+    This is a presence check used by the count/sample/select endpoints to
+    surface a clean 404 before issuing the actual SQL. Polaris/Hive/MinIO
+    ACLs still gate the underlying read, so we deliberately bypass the
+    user-namespace filter here to keep this purely about physical existence.
+    """
+    return database in get_databases(
+        spark=spark, return_json=False, filter_by_namespace=False
+    )
 
 
 def table_exists(

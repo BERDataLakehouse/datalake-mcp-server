@@ -161,7 +161,9 @@ class TestGetDatabases:
 
             mock_spark.sql.side_effect = sql_side_effect
 
-            result = data_store.get_databases(spark=mock_spark, return_json=False)
+            result = data_store.get_databases(
+                spark=mock_spark, return_json=False, filter_by_namespace=False
+            )
 
         assert result == [
             "kbase.research",
@@ -180,7 +182,9 @@ class TestGetDatabases:
         ):
             mock_spark.sql.return_value.collect.return_value = [{"namespace": "demo"}]
 
-            result = data_store.get_databases(spark=mock_spark, return_json=True)
+            result = data_store.get_databases(
+                spark=mock_spark, return_json=True, filter_by_namespace=False
+            )
 
         assert result == '["my.demo"]'
 
@@ -204,7 +208,9 @@ class TestGetDatabases:
 
             mock_spark.sql.side_effect = sql_side_effect
 
-            result = data_store.get_databases(spark=mock_spark, return_json=False)
+            result = data_store.get_databases(
+                spark=mock_spark, return_json=False, filter_by_namespace=False
+            )
 
         assert result == ["my.demo"]
 
@@ -216,7 +222,9 @@ class TestGetDatabases:
             patch.object(data_store, "_list_iceberg_catalogs", return_value=[]),
             patch.object(data_store, "_list_hive_databases", return_value=[]),
         ):
-            result = data_store.get_databases(spark=mock_spark, return_json=False)
+            result = data_store.get_databases(
+                spark=mock_spark, return_json=False, filter_by_namespace=False
+            )
 
         assert result == []
 
@@ -234,9 +242,88 @@ class TestGetDatabases:
         ):
             mock_spark.sql.return_value.collect.return_value = [{"namespace": "demo"}]
 
-            result = data_store.get_databases(spark=mock_spark, return_json=False)
+            result = data_store.get_databases(
+                spark=mock_spark, return_json=False, filter_by_namespace=False
+            )
 
         assert result == ["default", "my.demo", "u_alice__demo"]
+
+    def test_filter_by_namespace_requires_settings(self):
+        """Default filter_by_namespace=True without settings is a programmer error."""
+        mock_spark = MagicMock()
+
+        with (
+            patch.object(data_store, "_list_iceberg_catalogs", return_value=[]),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
+        ):
+            with pytest.raises(ValueError, match="settings must be provided"):
+                data_store.get_databases(spark=mock_spark, return_json=False)
+
+    def test_filter_by_namespace_requires_username(self):
+        mock_spark = MagicMock()
+
+        with (
+            patch.object(data_store, "_list_iceberg_catalogs", return_value=[]),
+            patch.object(data_store, "_list_hive_databases", return_value=[]),
+        ):
+            with pytest.raises(ValueError, match="settings.USER"):
+                data_store.get_databases(
+                    spark=mock_spark,
+                    return_json=False,
+                    settings={"USER": ""},
+                )
+
+    def test_filter_keeps_user_personal_and_tenant(self):
+        """Filter keeps own-user Hive prefix, tenant prefix, and allowed Iceberg catalogs."""
+        mock_spark = MagicMock()
+
+        with (
+            patch.object(
+                data_store,
+                "_list_iceberg_catalogs",
+                return_value=["my", "tgu2", "globalusers"],
+            ),
+            patch.object(
+                data_store,
+                "_list_hive_databases",
+                return_value=[
+                    "default",
+                    "globalusers_demo_shared",
+                    "u_bsadkhin__demo",
+                    "u_tgu2__demo_personal",
+                ],
+            ),
+        ):
+
+            def sql_side_effect(query):
+                result = MagicMock()
+                if "SHOW NAMESPACES IN my" in query:
+                    result.collect.return_value = [{"namespace": "demo_personal"}]
+                elif "SHOW NAMESPACES IN tgu2" in query:
+                    result.collect.return_value = [{"namespace": "demo_personal"}]
+                elif "SHOW NAMESPACES IN globalusers" in query:
+                    result.collect.return_value = [{"namespace": "shared_data"}]
+                return result
+
+            mock_spark.sql.side_effect = sql_side_effect
+
+            result = data_store.get_databases(
+                spark=mock_spark,
+                return_json=False,
+                settings={
+                    "USER": "tgu2",
+                    "POLARIS_PERSONAL_CATALOG": "user_tgu2",
+                    "POLARIS_TENANT_CATALOGS": "tenant_globalusers",
+                },
+            )
+
+        assert result == [
+            "globalusers.shared_data",
+            "globalusers_demo_shared",
+            "my.demo_personal",
+            "tgu2.demo_personal",
+            "u_tgu2__demo_personal",
+        ]
 
 
 # =============================================================================
@@ -265,6 +352,79 @@ class TestListHiveDatabases:
         mock_spark.sql.side_effect = Exception("HMS unreachable")
 
         assert data_store._list_hive_databases(mock_spark) == []
+
+
+# =============================================================================
+# Test namespace filter helpers
+# =============================================================================
+
+
+class TestAliasesForUser:
+    """Tests for _aliases_for_user."""
+
+    def test_derives_personal_and_tenant_aliases_from_dict(self):
+        personal, tenant = data_store._aliases_for_user(
+            {
+                "POLARIS_PERSONAL_CATALOG": "user_alice",
+                "POLARIS_TENANT_CATALOGS": "tenant_globalusers,tenant_kbase",
+            }
+        )
+
+        assert personal == {"my", "alice"}
+        assert tenant == {"globalusers", "kbase"}
+
+    def test_handles_missing_polaris_settings(self):
+        personal, tenant = data_store._aliases_for_user({})
+        assert personal == set()
+        assert tenant == set()
+
+
+class TestFilterToUserNamespaces:
+    """Tests for _filter_to_user_namespaces."""
+
+    def test_keeps_user_owned_and_tenant_databases(self):
+        databases = [
+            "default",
+            "globalusers.shared_data",
+            "globalusers_demo_shared",
+            "my.demo",
+            "alice.demo",
+            "u_alice__demo",
+            "u_bob__demo",
+        ]
+
+        result = data_store._filter_to_user_namespaces(
+            databases,
+            username="alice",
+            personal_aliases={"my", "alice"},
+            tenant_aliases={"globalusers"},
+        )
+
+        assert result == [
+            "globalusers.shared_data",
+            "globalusers_demo_shared",
+            "my.demo",
+            "alice.demo",
+            "u_alice__demo",
+        ]
+
+    def test_drops_unrelated_iceberg_catalogs(self):
+        result = data_store._filter_to_user_namespaces(
+            ["other_tenant.foo", "my.demo"],
+            username="alice",
+            personal_aliases={"my", "alice"},
+            tenant_aliases={"globalusers"},
+        )
+        assert result == ["my.demo"]
+
+    def test_drops_other_users_hive_databases(self):
+        result = data_store._filter_to_user_namespaces(
+            ["u_alice__demo", "u_bob__demo", "default"],
+            username="alice",
+            personal_aliases=set(),
+            tenant_aliases=set(),
+        )
+        assert result == ["u_alice__demo"]
 
 
 # =============================================================================

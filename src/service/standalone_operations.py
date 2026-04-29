@@ -279,17 +279,21 @@ def select_table_subprocess(
 
 def list_databases_subprocess(
     settings_dict: dict,
+    filter_by_namespace: bool = True,
     app_name: str = "mcp_list_dbs",
 ) -> list[str]:
     """
-    List Iceberg namespaces across all catalogs (subprocess version).
+    List Iceberg + Hive databases (subprocess version).
 
     Args:
         settings_dict: Picklable dict of BERDLSettings values
+        filter_by_namespace: If True (default), restrict to databases owned by
+            the user or accessible via the user's tenant catalogs.
         app_name: Spark application name
 
     Returns:
-        List of catalog.namespace strings
+        List of database identifiers (Iceberg ``catalog.namespace`` + Hive
+        flat names)
     """
     spark = None
     try:
@@ -297,6 +301,8 @@ def list_databases_subprocess(
         result = data_store.get_databases(
             spark=spark,
             return_json=False,
+            filter_by_namespace=filter_by_namespace,
+            settings=settings_dict,
         )
         return list(result)
     finally:
@@ -396,6 +402,7 @@ def get_db_structure_subprocess(
             return_json=False,
             filter_by_namespace=filter_by_namespace,
             auth_token=auth_token,
+            settings=settings_dict,
         )
         return dict(result)
     finally:
