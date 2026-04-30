@@ -68,6 +68,7 @@ def run_with_timeout(func, *, timeout_seconds=None, operation_name=None):
     """
     return func()
 
+
 # Row limits to prevent OOM and ensure service stability
 MAX_SAMPLE_ROWS = 100
 MAX_QUERY_ROWS = 1000  # Maximum rows returned by arbitrary SQL queries
