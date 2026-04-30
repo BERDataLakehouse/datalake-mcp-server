@@ -679,20 +679,23 @@ def get_spark_context(
             "Spark Connect server reachable, creating session (no lock required)"
         )
 
-        # FAST PATH: a recent SQL probe failed for this user — short-circuit
-        # before paying the cost of session creation + another probe. The
-        # mark expires after sc_health.SC_UNHEALTHY_TTL so we re-probe on
-        # the next request after that window.
+        # FAST PATH: a recent health check failed for this user — short-
+        # circuit before paying the cost of session creation. The mark is
+        # set by either a failed SELECT 1 probe OR a session-create timeout
+        # (see ``except SparkTimeoutError`` below) and expires after
+        # ``sc_health.SC_UNHEALTHY_TTL``, so we re-probe on the next request
+        # after that window.
         if sc_health.is_unhealthy(username):
             logger.info(
                 f"Spark Connect for {username} is marked unhealthy "
-                f"(last probe failed within {sc_health.SC_UNHEALTHY_TTL}s); "
+                f"(last health check failed within "
+                f"{sc_health.SC_UNHEALTHY_TTL}s); "
                 f"short-circuiting before session creation."
             )
             raise SparkConnectUnavailableError(
                 f"Spark Connect server for user '{username}' is wedged: a "
-                f"recent SELECT 1 probe failed. Restart your notebook pod "
-                f"to recover."
+                f"recent health check failed. Restart your notebook pod to "
+                f"recover."
             )
 
         # Session creation phase - exceptions here trigger fallback to Standalone
