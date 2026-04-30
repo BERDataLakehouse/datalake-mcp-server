@@ -223,7 +223,11 @@ def _get_spark_defaults_conf() -> dict[str, str]:
 
 def _get_delta_conf() -> dict[str, str]:
     return {
-        "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+        "spark.sql.extensions": (
+            "io.delta.sql.DeltaSparkSessionExtension,"
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
+            "org.apache.sedona.sql.SedonaSqlExtensions"
+        ),
         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         "spark.databricks.delta.retentionDurationCheck.enabled": "false",
         # Delta Lake optimizations
@@ -232,13 +236,101 @@ def _get_delta_conf() -> dict[str, str]:
     }
 
 
+def _sanitize_catalog_alias(value: str) -> str:
+    """Normalize a value into a Spark/Trino-compatible catalog alias."""
+    return re.sub(r"[^a-z0-9_]", "_", value.lower()).strip("_")
+
+
+def _get_personal_catalog_aliases(personal_catalog: str | None) -> list[str]:
+    """Return Spark aliases for the current user's personal Polaris catalog."""
+    if not personal_catalog:
+        return []
+
+    aliases = ["my"]
+    portable_alias = personal_catalog.strip()
+    if portable_alias.startswith("user_"):
+        portable_alias = portable_alias[len("user_") :]
+    portable_alias = _sanitize_catalog_alias(portable_alias)
+    if portable_alias and portable_alias not in aliases:
+        aliases.append(portable_alias)
+    return aliases
+
+
+def _get_tenant_catalog_alias(tenant_catalog: str) -> str:
+    """Return the short engine alias for a Polaris tenant catalog."""
+    alias = tenant_catalog.strip()
+    if alias.startswith("tenant_"):
+        alias = alias[len("tenant_") :]
+    return _sanitize_catalog_alias(alias)
+
+
+def _get_catalog_conf(settings: BERDLSettings) -> dict[str, str]:
+    """Get Iceberg catalog configuration for Polaris REST catalog."""
+    config = {}
+
+    if not settings.POLARIS_CATALOG_URI:
+        return config
+
+    polaris_uri = str(settings.POLARIS_CATALOG_URI).rstrip("/")
+
+    # S3/MinIO properties for Iceberg's S3FileIO (used by executors to read/write data files).
+    # Iceberg does NOT use Spark's spark.hadoop.fs.s3a.* — it has its own AWS SDK S3 client.
+    s3_endpoint = settings.MINIO_ENDPOINT_URL
+    if not s3_endpoint.startswith("http"):
+        s3_endpoint = f"http://{s3_endpoint}"
+    s3_props = {
+        "s3.endpoint": s3_endpoint,
+        "s3.access-key-id": settings.MINIO_ACCESS_KEY,
+        "s3.secret-access-key": settings.MINIO_SECRET_KEY,
+        "s3.path-style-access": "true",
+        "s3.region": "us-east-1",
+    }
+
+    def _catalog_props(prefix: str, warehouse: str) -> dict[str, str]:
+        props = {
+            f"{prefix}": "org.apache.iceberg.spark.SparkCatalog",
+            f"{prefix}.type": "rest",
+            f"{prefix}.uri": polaris_uri,
+            f"{prefix}.credential": settings.POLARIS_CREDENTIAL or "",
+            f"{prefix}.warehouse": warehouse,
+            f"{prefix}.scope": "PRINCIPAL_ROLE:ALL",
+            f"{prefix}.token-refresh-enabled": "false",
+            f"{prefix}.client.region": "us-east-1",
+        }
+        for k, v in s3_props.items():
+            props[f"{prefix}.{k}"] = v
+        return props
+
+    if settings.POLARIS_PERSONAL_CATALOG:
+        for catalog_alias in _get_personal_catalog_aliases(
+            settings.POLARIS_PERSONAL_CATALOG
+        ):
+            config.update(
+                _catalog_props(
+                    f"spark.sql.catalog.{catalog_alias}",
+                    settings.POLARIS_PERSONAL_CATALOG,
+                )
+            )
+    if settings.POLARIS_TENANT_CATALOGS:
+        for tenant_catalog in settings.POLARIS_TENANT_CATALOGS.split(","):
+            tenant_catalog = tenant_catalog.strip()
+            if not tenant_catalog:
+                continue
+            catalog_alias = _get_tenant_catalog_alias(tenant_catalog)
+            if not catalog_alias:
+                continue
+            config.update(
+                _catalog_props(f"spark.sql.catalog.{catalog_alias}", tenant_catalog)
+            )
+    return config
+
+
 def _get_hive_conf(settings: BERDLSettings) -> dict[str, str]:
+    # Do not set spark.sql.hive.metastore.version / .jars. Forcing version=4.0.0
+    # selects Spark's Hive 4 shim while the bundled client jars may be older.
     return {
-        "hive.metastore.uris": str(settings.BERDL_HIVE_METASTORE_URI),
+        "spark.hadoop.hive.metastore.uris": str(settings.BERDL_HIVE_METASTORE_URI),
         "spark.sql.catalogImplementation": "hive",
-        "spark.sql.hive.metastore.version": "4.0.0",
-        "spark.sql.hive.metastore.jars": "path",
-        "spark.sql.hive.metastore.jars.path": "/usr/local/spark/jars/*",
     }
 
 
@@ -315,6 +407,21 @@ IMMUTABLE_CONFIGS = {
 }
 
 
+def _is_immutable_config(key: str) -> bool:
+    """Check if a Spark config key is immutable in Spark Connect mode."""
+    if key in IMMUTABLE_CONFIGS:
+        return True
+    # Iceberg catalog configs (spark.sql.catalog.<name>.*) are all static/immutable
+    # because catalogs must be registered at server startup. The catalog names are
+    # dynamic (personal "my" + tenant aliases), so we match by prefix.
+    if (
+        key.startswith("spark.sql.catalog.")
+        and key != "spark.sql.catalog.spark_catalog"
+    ):
+        return True
+    return False
+
+
 def _filter_immutable_spark_connect_configs(config: dict[str, str]) -> dict[str, str]:
     """
     Filter out configurations that cannot be modified in Spark Connect mode.
@@ -329,7 +436,48 @@ def _filter_immutable_spark_connect_configs(config: dict[str, str]) -> dict[str,
         Filtered configuration dictionary with only mutable configs
 
     """
-    return {k: v for k, v in config.items() if k not in IMMUTABLE_CONFIGS}
+    return {k: v for k, v in config.items() if not _is_immutable_config(k)}
+
+
+def _redact_spark_remote(remote: str | None) -> str:
+    """Redact bearer-like Spark Connect URL parameters before logging."""
+    if not remote:
+        return "N/A"
+    return re.sub(r"(;x-kbase-token=)[^;]+", r"\1<redacted>", remote)
+
+
+def _warm_polaris_catalogs(spark: SparkSession, settings: BERDLSettings) -> None:
+    """
+    Touch Spark Connect Polaris catalogs so they are visible in SHOW CATALOGS.
+
+    Spark lazily initializes REST catalog plugins. Accessing each configured
+    alias once registers the server-side catalog with the session.
+
+    This is intentionally not called during MCP request setup. The MCP data
+    store discovers catalogs from Spark config instead, and eager SQL here can
+    block a request worker before the route body runs.
+    """
+    catalog_aliases: list[str] = []
+    catalog_aliases.extend(
+        _get_personal_catalog_aliases(settings.POLARIS_PERSONAL_CATALOG)
+    )
+
+    if settings.POLARIS_TENANT_CATALOGS:
+        for raw_catalog in settings.POLARIS_TENANT_CATALOGS.split(","):
+            raw_catalog = raw_catalog.strip()
+            if not raw_catalog:
+                continue
+            alias = _get_tenant_catalog_alias(raw_catalog)
+            if alias:
+                catalog_aliases.append(alias)
+
+    for alias in catalog_aliases:
+        try:
+            spark.sql(f"SHOW NAMESPACES IN {alias}").collect()
+        except Exception:
+            logger.debug(
+                "Unable to warm Polaris catalog alias '%s'", alias, exc_info=True
+            )
 
 
 def _set_scheduler_pool(spark: SparkSession, scheduler_pool: str) -> None:
@@ -521,6 +669,9 @@ def generate_spark_conf(
         if use_hive:
             config.update(_get_hive_conf(settings))
 
+        # Always add Polaris catalogs if they are configured
+        config.update(_get_catalog_conf(settings))
+
         if use_spark_connect:
             # Spark Connect: filter out immutable configs that cannot be modified from the client
             config = _filter_immutable_spark_connect_configs(config)
@@ -659,7 +810,8 @@ def get_spark_session(
             # Note: This only applies to remote Spark Connect, not local sessions.
             logger.info(
                 f"Creating Spark Connect session using create() "
-                f"(app_name={app_name}, remote={config.get('spark.remote', 'N/A')})"
+                f"(app_name={app_name}, "
+                f"remote={_redact_spark_remote(config.get('spark.remote'))})"
             )
             spark = builder.config(conf=spark_conf).create()
 

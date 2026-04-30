@@ -7,10 +7,12 @@ import os
 import random
 import re
 import socket
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Generator
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import grpc
 import httpx
@@ -26,13 +28,40 @@ from src.delta_lake.setup_spark_session import (
     get_spark_session as _get_spark_session,
     get_spark_session_with_retry as _get_spark_session_with_retry,
 )
-from src.service import app_state
-from src.service.exceptions import MissingTokenError, TrinoConnectionError
+from src.service import app_state, sc_health
+from src.service.exceptions import (
+    MissingTokenError,
+    SparkConnectUnavailableError,
+    SparkTimeoutError,
+    TrinoConnectionError,
+)
 from src.service.http_bearer import KBaseHTTPBearer
 from src.service.models import QueryEngine
 from src.service.spark_session_pool import STANDALONE_POOL_SIZE
+from src.service.timeouts import run_with_timeout
 from src.settings import BERDLSettings, get_settings
 from src.trino_engine.trino_connection import create_trino_connection
+
+# How long to wait for the post-create health probe (``spark.version``)
+# when validating a freshly created Spark Connect session. Healthy SCs
+# respond in < 100 ms; 5 s gives generous headroom while still being short
+# enough that a hung user notebook is detected long before a 115 s
+# request-timeout budget would expire.
+_SC_PROBE_TIMEOUT_SECONDS = float(os.getenv("SC_PROBE_TIMEOUT_SECONDS", "5"))
+
+# Maximum time we'll wait for ``SparkSession.builder.remote(...).create()`` to
+# complete. Companion bound to ``_SC_PROBE_TIMEOUT_SECONDS``: the SQL probe
+# catches wedged JVMs that respond to ``create()`` but hang on actual SQL;
+# this bound catches wedged Spark Connect servers that hang on ``create()``
+# itself — observed in stage when the user's notebook pod was reachable at
+# the gRPC transport layer (channel ready) but the SC server inside it had a
+# stale client-side gRPC channel pinned to a pod IP that no longer existed
+# after a notebook restart. Without this bound the call hangs for the full
+# FastAPI request-timeout budget (~115 s) and every subsequent call from the
+# same user blocks the same way until the MCP pod is restarted.
+#
+# 15 s is generous: a healthy session creation is < 500 ms even under load.
+_SC_CREATE_TIMEOUT_SECONDS = float(os.getenv("SC_CREATE_TIMEOUT_SECONDS", "15"))
 
 # Initialize the KBase auth dependency for use in routes
 auth = KBaseHTTPBearer()
@@ -192,6 +221,180 @@ def fetch_user_minio_credentials(
         f"Successfully fetched MinIO credentials for user: {data.get('username')}"
     )
     return access_key, secret_key
+
+
+# Per-user in-process cache for Polaris credentials.
+#
+# POST /polaris/user_provision/{username} is a provisioning call: idempotent but
+# multi-step (DB + Polaris HTTP) even on a hit. Calling it on every request
+# forces every datalake-mcp-server request to wait on MMS, which caps throughput
+# at well under 1k RPS and wedges the threadpool when MMS is slow. Polaris
+# credentials are stable per-user until explicit rotation, so we cache the
+# response in-process with a TTL and coalesce concurrent fetches per user.
+_POLARIS_CRED_CACHE_TTL = int(os.getenv("POLARIS_CRED_CACHE_TTL", "900"))
+_polaris_cred_cache: dict[str, tuple[float, dict[str, str] | None]] = {}
+_polaris_cred_cache_lock = threading.Lock()
+_polaris_per_user_locks: dict[str, threading.Lock] = {}
+
+
+def _get_polaris_user_lock(username: str) -> threading.Lock:
+    with _polaris_cred_cache_lock:
+        lock = _polaris_per_user_locks.get(username)
+        if lock is None:
+            lock = threading.Lock()
+            _polaris_per_user_locks[username] = lock
+        return lock
+
+
+def invalidate_polaris_credentials(username: str) -> None:
+    """Drop a user's cached Polaris credentials (e.g. after explicit rotation)."""
+    with _polaris_cred_cache_lock:
+        _polaris_cred_cache.pop(username, None)
+
+
+def fetch_user_polaris_credentials(
+    governance_api_url: str,
+    username: str,
+    auth_token: str,
+) -> dict[str, str] | None:
+    """
+    Provision and fetch the user's Polaris credentials from the Governance API.
+
+    Mirrors spark_notebook's startup flow by calling
+    POST /polaris/user_provision/{username}. The Governance API reuses cached
+    credentials server-side and returns the personal and tenant Polaris catalogs
+    the user can access.
+
+    Results are cached in-process per-user for ``POLARIS_CRED_CACHE_TTL`` seconds
+    to keep this off the per-request hot path.
+    """
+    cached = _polaris_cred_cache.get(username)
+    if cached and (time.monotonic() - cached[0]) < _POLARIS_CRED_CACHE_TTL:
+        return cached[1]
+
+    user_lock = _get_polaris_user_lock(username)
+    with user_lock:
+        cached = _polaris_cred_cache.get(username)
+        if cached and (time.monotonic() - cached[0]) < _POLARIS_CRED_CACHE_TTL:
+            return cached[1]
+
+        result = _fetch_user_polaris_credentials_uncached(
+            governance_api_url, username, auth_token
+        )
+        _polaris_cred_cache[username] = (time.monotonic(), result)
+        return result
+
+
+def _fetch_user_polaris_credentials_uncached(
+    governance_api_url: str,
+    username: str,
+    auth_token: str,
+) -> dict[str, str] | None:
+    safe_username = quote(username, safe="")
+    url = (
+        f"{str(governance_api_url).rstrip('/')}/polaris/user_provision/{safe_username}"
+    )
+    logger.debug(f"Fetching Polaris credentials from governance API: {url}")
+
+    response = httpx.post(
+        url, headers={"Authorization": f"Bearer {auth_token}"}, timeout=30.0
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    personal_catalog = data.get("personal_catalog")
+    tenant_catalogs = data.get("tenant_catalogs") or []
+
+    if not client_id or not client_secret or not personal_catalog:
+        raise ValueError(
+            "Invalid Polaris response from governance API: missing "
+            "client_id, client_secret, or personal_catalog"
+        )
+
+    if isinstance(tenant_catalogs, str):
+        tenant_catalogs_value = tenant_catalogs
+    else:
+        tenant_catalogs_value = ",".join(str(c) for c in tenant_catalogs if c)
+
+    logger.info(f"Successfully fetched Polaris credentials for user: {username}")
+    return {
+        "POLARIS_CREDENTIAL": f"{client_id}:{client_secret}",
+        "POLARIS_PERSONAL_CATALOG": str(personal_catalog),
+        "POLARIS_TENANT_CATALOGS": tenant_catalogs_value,
+    }
+
+
+def _get_effective_polaris_settings(
+    settings: BERDLSettings,
+    username: str,
+    auth_token: str,
+) -> dict[str, str | None]:
+    """Build per-user Polaris settings, fetching fresh credentials when configured."""
+    polaris_settings: dict[str, str | None] = {
+        "POLARIS_CATALOG_URI": str(settings.POLARIS_CATALOG_URI)
+        if settings.POLARIS_CATALOG_URI
+        else None,
+        "POLARIS_CREDENTIAL": settings.POLARIS_CREDENTIAL,
+        "POLARIS_PERSONAL_CATALOG": settings.POLARIS_PERSONAL_CATALOG,
+        "POLARIS_TENANT_CATALOGS": settings.POLARIS_TENANT_CATALOGS,
+    }
+
+    if not settings.POLARIS_CATALOG_URI:
+        return polaris_settings
+
+    try:
+        fetched_settings = fetch_user_polaris_credentials(
+            settings.GOVERNANCE_API_URL,
+            username,
+            auth_token,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch Polaris credentials for %s: %s: %s. "
+            "Continuing with configured Polaris settings.",
+            username,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
+        return polaris_settings
+
+    if fetched_settings:
+        polaris_settings.update(fetched_settings)
+    return polaris_settings
+
+
+def _build_user_settings_dict(
+    settings: BERDLSettings,
+    username: str,
+    auth_token: str,
+    minio_access_key: str,
+    minio_secret_key: str,
+) -> dict[str, str | int | bool | None]:
+    """Build picklable per-user settings for Spark, Trino, and async subprocesses."""
+    return {
+        "KBASE_AUTH_TOKEN": auth_token,
+        "USER": username,
+        "MINIO_ACCESS_KEY": minio_access_key,
+        "MINIO_SECRET_KEY": minio_secret_key,
+        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
+        "MINIO_SECURE": settings.MINIO_SECURE,
+        "SPARK_HOME": settings.SPARK_HOME,
+        "SPARK_MASTER_URL": str(settings.SPARK_MASTER_URL)
+        if settings.SPARK_MASTER_URL
+        else None,
+        "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
+        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
+        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
+        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
+        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
+        "GOVERNANCE_API_URL": str(settings.GOVERNANCE_API_URL),
+        "BERDL_POD_IP": settings.BERDL_POD_IP,
+        **_get_effective_polaris_settings(settings, username, auth_token),
+    }
 
 
 def get_user_from_request(request: Request) -> str:
@@ -449,27 +652,13 @@ def get_spark_context(
             f"{type(e).__name__}: {e}"
         )
 
-    # Build base user-specific settings as picklable dict
-    # Note: URLs are converted to strings for pickling
-    base_user_settings_dict = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "SPARK_HOME": settings.SPARK_HOME,
-        "SPARK_MASTER_URL": str(settings.SPARK_MASTER_URL)
-        if settings.SPARK_MASTER_URL
-        else None,
-        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
-        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
-        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
-        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
-        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
-        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
-        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
-        "BERDL_POD_IP": settings.BERDL_POD_IP,
-    }
+    base_user_settings_dict = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
 
     # Try Spark Connect first with gRPC health check
     spark_connect_url = construct_user_spark_connect_url(username)
@@ -491,13 +680,31 @@ def get_spark_context(
             "Spark Connect server reachable, creating session (no lock required)"
         )
 
+        # FAST PATH: a recent health check failed for this user — short-
+        # circuit before paying the cost of session creation. The mark is
+        # set by either a failed SELECT 1 probe OR a session-create timeout
+        # (see ``except SparkTimeoutError`` below) and expires after
+        # ``sc_health.SC_UNHEALTHY_TTL``, so we re-probe on the next request
+        # after that window.
+        if sc_health.is_unhealthy(username):
+            logger.info(
+                f"Spark Connect for {username} is marked unhealthy "
+                f"(last health check failed within "
+                f"{sc_health.SC_UNHEALTHY_TTL}s); "
+                f"short-circuiting before session creation."
+            )
+            raise SparkConnectUnavailableError(
+                f"Spark Connect server for user '{username}' is wedged: a "
+                f"recent health check failed. Restart your notebook pod to "
+                f"recover."
+            )
+
         # Session creation phase - exceptions here trigger fallback to Standalone
         spark = None
         app_name = f"datalake_mcp_server_{username}"
         try:
             user_settings = BERDLSettings(
                 SPARK_CONNECT_URL=AnyUrl(spark_connect_url),
-                KBASE_AUTH_TOKEN=auth_token or "",
                 **{
                     k: v
                     for k, v in base_user_settings_dict.items()
@@ -509,27 +716,48 @@ def get_spark_context(
             )
 
             # Use retry wrapper to handle INVALID_HANDLE.SESSION_CLOSED errors
-            # that occur when the Spark Connect server has restarted
-            spark = _get_spark_session_with_retry(
-                app_name=app_name,
-                settings=user_settings,
-                use_spark_connect=True,
-                max_retries=2,
+            # that occur when the Spark Connect server has restarted.
+            #
+            # Bound the call with ``_SC_CREATE_TIMEOUT_SECONDS``:
+            # ``SparkSession.builder.remote(...).create()`` itself has no
+            # deadline, and a Spark Connect server with a stale gRPC channel
+            # (e.g. after a notebook pod restart) can hang here for the full
+            # request-timeout budget. ``SparkTimeoutError`` is handled below
+            # the same way as a SQL probe failure: mark the user unhealthy
+            # and surface a clean 503 — a silent fallback to the standalone
+            # subprocess pool would hide the real problem and waste capacity.
+            spark = run_with_timeout(
+                lambda: _get_spark_session_with_retry(
+                    app_name=app_name,
+                    settings=user_settings,
+                    use_spark_connect=True,
+                    max_retries=2,
+                ),
+                timeout_seconds=_SC_CREATE_TIMEOUT_SECONDS,
+                operation_name=f"sc_create_session[{username}]",
             )
-
-            # Validate session works before returning by making a quick server round-trip
-            # This catches any remaining edge cases where session appears valid but isn't
-            try:
-                _ = spark.version
-            except Exception as validation_error:
-                logger.warning(
-                    f"Session validation failed for {username}, session may be unusable: "
-                    f"{type(validation_error).__name__}: {validation_error}"
-                )
-                raise
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
+        except SparkTimeoutError:
+            # Wedged ``create()`` — same operator-actionable signature as a
+            # failed SQL probe. Mark unhealthy + raise so subsequent requests
+            # short-circuit on the fast path above, and so this request fails
+            # with a clear, actionable message instead of degrading silently.
+            logger.warning(
+                f"Spark Connect session creation timed out for {username} "
+                f"after {_SC_CREATE_TIMEOUT_SECONDS}s "
+                f"(server reachable at gRPC layer but did not respond to "
+                f"create()). Marking SC unhealthy for "
+                f"{sc_health.SC_UNHEALTHY_TTL}s."
+            )
+            sc_health.mark_unhealthy(username)
+            raise SparkConnectUnavailableError(
+                f"Spark Connect server for user '{username}' did not respond "
+                f"to a session-create RPC within "
+                f"{int(_SC_CREATE_TIMEOUT_SECONDS)}s. Restart your notebook "
+                f"pod to recover."
+            )
         except Exception as e:
             # Spark Connect session creation failed despite health check passing
             # This can happen due to race conditions or transient network issues
@@ -539,6 +767,52 @@ def get_spark_context(
                 exc_info=True,
             )
             spark_connect_failed = True
+
+        # HEALTH PROBE: separate from session creation. Catches the case
+        # where ``create()`` returned but the session is otherwise unusable
+        # (gRPC channel half-broken, driver wedged on a startup task, etc.).
+        #
+        # We probe with ``spark.version`` rather than ``SELECT 1`` because:
+        #
+        # * ``spark.version`` is a **unary** ``AnalyzePlan`` gRPC call —
+        #   request goes out, single response comes back, done.
+        # * ``SELECT 1`` is an ``ExecutePlan`` call that uses Spark Connect's
+        #   **reattachable streaming** protocol by default. PySpark's reattach
+        #   machinery is bound to the thread that created the session, and
+        #   we observed in stage that when the probe runs in a *different*
+        #   thread (which ``run_with_timeout`` does — it submits to a
+        #   ``ThreadPoolExecutor``), the server sends responses but the
+        #   client never reads them. Those operations show up as
+        #   ``"abandoned and expired"`` in the Spark Connect JVM log
+        #   ~5 minutes later, even though the SQL completed in <100 ms.
+        #   Result: every probe times out at ``_SC_PROBE_TIMEOUT_SECONDS``,
+        #   ``sc_health`` marks the user unhealthy, and they cannot use MCP
+        #   even though their Spark cluster is perfectly fine.
+        #
+        # ``spark.version`` validates the same things we care about for the
+        # probe (gRPC channel works, server can respond, driver thread is
+        # alive) without going through the reattach machinery.
+        if spark is not None and not spark_connect_failed:
+            try:
+                run_with_timeout(
+                    lambda: spark.version,
+                    timeout_seconds=_SC_PROBE_TIMEOUT_SECONDS,
+                    operation_name=f"sc_health_probe[{username}]",
+                )
+            except Exception as probe_error:
+                logger.warning(
+                    f"Spark Connect health probe (spark.version) failed for "
+                    f"{username}: {type(probe_error).__name__}: "
+                    f"{probe_error}. Marking SC unhealthy for "
+                    f"{sc_health.SC_UNHEALTHY_TTL}s."
+                )
+                sc_health.mark_unhealthy(username)
+                raise SparkConnectUnavailableError(
+                    f"Spark Connect server for user '{username}' accepted a "
+                    f"session but did not respond to spark.version within "
+                    f"{int(_SC_PROBE_TIMEOUT_SECONDS)}s. Restart your "
+                    f"notebook pod to recover."
+                )
 
         # Yield phase - OUTSIDE the try/except so route execution errors propagate
         # correctly instead of triggering a fallback (which would yield twice)
@@ -679,23 +953,13 @@ def get_spark_session(
             f"{type(e).__name__}: {e}"
         )
 
-    base_user_settings = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "SPARK_HOME": settings.SPARK_HOME,
-        "SPARK_MASTER_URL": settings.SPARK_MASTER_URL,
-        "BERDL_HIVE_METASTORE_URI": settings.BERDL_HIVE_METASTORE_URI,
-        "SPARK_WORKER_COUNT": settings.SPARK_WORKER_COUNT,
-        "SPARK_WORKER_CORES": settings.SPARK_WORKER_CORES,
-        "SPARK_WORKER_MEMORY": settings.SPARK_WORKER_MEMORY,
-        "SPARK_MASTER_CORES": settings.SPARK_MASTER_CORES,
-        "SPARK_MASTER_MEMORY": settings.SPARK_MASTER_MEMORY,
-        "GOVERNANCE_API_URL": settings.GOVERNANCE_API_URL,
-        "BERDL_POD_IP": settings.BERDL_POD_IP,
-    }
+    base_user_settings = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
 
     spark_connect_url = construct_user_spark_connect_url(username)
     use_spark_connect = is_spark_connect_reachable(spark_connect_url, timeout=2.0)
@@ -794,6 +1058,14 @@ def get_trino_context(
             f"for user {username}: {type(e).__name__}: {e}"
         ) from e
 
+    user_settings_dict = _build_user_settings_dict(
+        settings=settings,
+        username=username,
+        auth_token=auth_token,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+    )
+
     conn = create_trino_connection(
         username=username,
         auth_token=auth_token,
@@ -804,18 +1076,16 @@ def get_trino_context(
         hive_metastore_uri=str(settings.BERDL_HIVE_METASTORE_URI),
         minio_endpoint_url=settings.MINIO_ENDPOINT_URL,
         minio_secure=settings.MINIO_SECURE,
+        polaris_catalog_uri=user_settings_dict.get("POLARIS_CATALOG_URI"),
+        polaris_credential=user_settings_dict.get("POLARIS_CREDENTIAL"),
+        polaris_personal_catalog=user_settings_dict.get("POLARIS_PERSONAL_CATALOG"),
+        polaris_tenant_catalogs=user_settings_dict.get("POLARIS_TENANT_CATALOGS"),
     )
 
     settings_dict = {
-        "USER": username,
-        "MINIO_ACCESS_KEY": minio_access_key,
-        "MINIO_SECRET_KEY": minio_secret_key,
-        "MINIO_ENDPOINT_URL": settings.MINIO_ENDPOINT_URL,
-        "MINIO_SECURE": settings.MINIO_SECURE,
-        "BERDL_HIVE_METASTORE_URI": str(settings.BERDL_HIVE_METASTORE_URI),
+        **user_settings_dict,
         "TRINO_HOST": settings.TRINO_HOST,
         "TRINO_PORT": settings.TRINO_PORT,
-        "GOVERNANCE_API_URL": str(settings.GOVERNANCE_API_URL),
     }
 
     ctx = TrinoContext(

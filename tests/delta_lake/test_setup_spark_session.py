@@ -27,7 +27,9 @@ from src.delta_lake.setup_spark_session import (
     _get_delta_conf,
     _get_hive_conf,
     _get_s3_conf,
+    _get_catalog_conf,
     _filter_immutable_spark_connect_configs,
+    _redact_spark_remote,
     _set_scheduler_pool,
     _clear_spark_env_for_mode_switch,
     _clear_stale_spark_connect_sessions,
@@ -279,12 +281,16 @@ class TestGetDeltaConf:
         assert isinstance(config, dict)
 
     def test_delta_extensions(self):
-        """Test Delta Lake SQL extensions are configured."""
+        """Test SQL extensions are configured (Delta + Iceberg + Sedona)."""
         config = _get_delta_conf()
 
+        extensions = config["spark.sql.extensions"]
+        assert "io.delta.sql.DeltaSparkSessionExtension" in extensions
         assert (
-            config["spark.sql.extensions"] == "io.delta.sql.DeltaSparkSessionExtension"
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+            in extensions
         )
+        assert "org.apache.sedona.sql.SedonaSqlExtensions" in extensions
         assert (
             config["spark.sql.catalog.spark_catalog"]
             == "org.apache.spark.sql.delta.catalog.DeltaCatalog"
@@ -313,7 +319,7 @@ class TestGetHiveConf:
         """Test Hive metastore URI is configured."""
         config = _get_hive_conf(test_settings)
 
-        assert config["hive.metastore.uris"] == str(
+        assert config["spark.hadoop.hive.metastore.uris"] == str(
             test_settings.BERDL_HIVE_METASTORE_URI
         )
 
@@ -323,13 +329,13 @@ class TestGetHiveConf:
 
         assert config["spark.sql.catalogImplementation"] == "hive"
 
-    def test_hive_metastore_version(self, test_settings):
-        """Test Hive metastore version."""
+    def test_hive_metastore_client_jars_not_forced(self, test_settings):
+        """Test Hive client jar settings are left to the runtime image."""
         config = _get_hive_conf(test_settings)
 
-        assert config["spark.sql.hive.metastore.version"] == "4.0.0"
-        assert config["spark.sql.hive.metastore.jars"] == "path"
-        assert "spark.sql.hive.metastore.jars.path" in config
+        assert "spark.sql.hive.metastore.version" not in config
+        assert "spark.sql.hive.metastore.jars" not in config
+        assert "spark.sql.hive.metastore.jars.path" not in config
 
 
 # =============================================================================
@@ -409,6 +415,138 @@ class TestGetS3Conf:
 
 
 # =============================================================================
+# Test _get_catalog_conf
+# =============================================================================
+
+
+class TestGetCatalogConf:
+    """Tests for the _get_catalog_conf function (Polaris Iceberg catalogs)."""
+
+    def test_returns_empty_when_polaris_not_configured(self, test_settings):
+        """Test that no catalog config is returned when POLARIS_CATALOG_URI is unset."""
+        assert test_settings.POLARIS_CATALOG_URI is None
+        config = _get_catalog_conf(test_settings)
+        assert config == {}
+
+    def test_personal_catalog_configured(self):
+        """Test personal catalog config when Polaris is configured."""
+        settings = BERDLSettings(
+            USER="testuser",
+            MINIO_ENDPOINT_URL="http://minio:9000",
+            MINIO_ACCESS_KEY="access",
+            MINIO_SECRET_KEY="secret",
+            SPARK_CONNECT_URL=AnyUrl("sc://localhost:15002"),
+            BERDL_HIVE_METASTORE_URI=AnyUrl("thrift://localhost:9083"),
+            GOVERNANCE_API_URL=AnyHttpUrl("http://localhost:8000"),
+            POLARIS_CATALOG_URI=AnyHttpUrl("http://polaris:8181/api/catalog"),
+            POLARIS_CREDENTIAL="client_id:client_secret",
+            POLARIS_PERSONAL_CATALOG="user_testuser",
+        )
+        config = _get_catalog_conf(settings)
+
+        assert config["spark.sql.catalog.my"] == "org.apache.iceberg.spark.SparkCatalog"
+        assert config["spark.sql.catalog.my.type"] == "rest"
+        assert config["spark.sql.catalog.my.uri"] == "http://polaris:8181/api/catalog"
+        assert config["spark.sql.catalog.my.credential"] == "client_id:client_secret"
+        assert config["spark.sql.catalog.my.warehouse"] == "user_testuser"
+        assert config["spark.sql.catalog.my.s3.endpoint"] == "http://minio:9000"
+        assert config["spark.sql.catalog.my.s3.path-style-access"] == "true"
+        assert (
+            config["spark.sql.catalog.testuser"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
+        assert config["spark.sql.catalog.testuser.warehouse"] == "user_testuser"
+
+    def test_tenant_catalogs_configured(self):
+        """Test tenant catalogs with alias stripping."""
+        settings = BERDLSettings(
+            USER="testuser",
+            MINIO_ENDPOINT_URL="http://minio:9000",
+            MINIO_ACCESS_KEY="access",
+            MINIO_SECRET_KEY="secret",
+            SPARK_CONNECT_URL=AnyUrl("sc://localhost:15002"),
+            BERDL_HIVE_METASTORE_URI=AnyUrl("thrift://localhost:9083"),
+            GOVERNANCE_API_URL=AnyHttpUrl("http://localhost:8000"),
+            POLARIS_CATALOG_URI=AnyHttpUrl("http://polaris:8181/api/catalog"),
+            POLARIS_CREDENTIAL="cid:csecret",
+            POLARIS_TENANT_CATALOGS="tenant_research,tenant_public",
+        )
+        config = _get_catalog_conf(settings)
+
+        # tenant_research -> alias "research"
+        assert (
+            config["spark.sql.catalog.research"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
+        assert config["spark.sql.catalog.research.warehouse"] == "tenant_research"
+        # tenant_public -> alias "public"
+        assert (
+            config["spark.sql.catalog.public"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
+        assert config["spark.sql.catalog.public.warehouse"] == "tenant_public"
+
+    def test_auto_enabled_in_generate_spark_conf(self):
+        """Test that catalog config is automatically included in generate_spark_conf (standalone mode)."""
+        settings = BERDLSettings(
+            USER="testuser",
+            MINIO_ENDPOINT_URL="http://minio:9000",
+            MINIO_ACCESS_KEY="access",
+            MINIO_SECRET_KEY="secret",
+            SPARK_CONNECT_URL=AnyUrl("sc://localhost:15002"),
+            SPARK_MASTER_URL=AnyUrl("spark://master:7077"),
+            BERDL_HIVE_METASTORE_URI=AnyUrl("thrift://localhost:9083"),
+            GOVERNANCE_API_URL=AnyHttpUrl("http://localhost:8000"),
+            BERDL_POD_IP="10.0.0.1",
+            POLARIS_CATALOG_URI=AnyHttpUrl("http://polaris:8181/api/catalog"),
+            POLARIS_CREDENTIAL="cid:csecret",
+            POLARIS_PERSONAL_CATALOG="user_testuser",
+        )
+        with patch("socket.gethostbyname", return_value="192.168.1.1"):
+            with patch("socket.gethostname", return_value="host"):
+                config = generate_spark_conf(
+                    app_name="TestApp",
+                    local=False,
+                    settings=settings,
+                    use_spark_connect=False,
+                )
+
+        # Catalog config should be present in standalone mode
+        assert config["spark.sql.catalog.my"] == "org.apache.iceberg.spark.SparkCatalog"
+        assert config["spark.sql.catalog.my.uri"] == "http://polaris:8181/api/catalog"
+        assert (
+            config["spark.sql.catalog.testuser"]
+            == "org.apache.iceberg.spark.SparkCatalog"
+        )
+
+    def test_catalog_filtered_in_spark_connect_mode(self):
+        """Test that catalog configs are filtered out in Spark Connect mode (immutable)."""
+        settings = BERDLSettings(
+            USER="testuser",
+            MINIO_ENDPOINT_URL="http://minio:9000",
+            MINIO_ACCESS_KEY="access",
+            MINIO_SECRET_KEY="secret",
+            SPARK_CONNECT_URL=AnyUrl("sc://localhost:15002"),
+            BERDL_HIVE_METASTORE_URI=AnyUrl("thrift://localhost:9083"),
+            GOVERNANCE_API_URL=AnyHttpUrl("http://localhost:8000"),
+            POLARIS_CATALOG_URI=AnyHttpUrl("http://polaris:8181/api/catalog"),
+            POLARIS_CREDENTIAL="cid:csecret",
+            POLARIS_PERSONAL_CATALOG="user_testuser",
+        )
+        config = generate_spark_conf(
+            app_name="TestApp",
+            local=False,
+            settings=settings,
+            use_spark_connect=True,
+        )
+
+        # Catalog configs should be filtered out (they're immutable/server-side)
+        assert "spark.sql.catalog.my" not in config
+        assert "spark.sql.catalog.my.uri" not in config
+        assert "spark.sql.catalog.testuser" not in config
+
+
+# =============================================================================
 # Test _filter_immutable_spark_connect_configs
 # =============================================================================
 
@@ -461,6 +599,21 @@ class TestFilterImmutableSparkConnectConfigs:
         assert "spark.executor.memory" in IMMUTABLE_CONFIGS
         assert "spark.sql.warehouse.dir" in IMMUTABLE_CONFIGS
         assert "spark.eventLog.dir" in IMMUTABLE_CONFIGS
+
+
+class TestRedactSparkRemote:
+    """Tests for safe Spark Connect URL logging."""
+
+    def test_redacts_kbase_token(self):
+        remote = "sc://spark-notebook:15002/;x-kbase-token=secret-token"
+
+        assert (
+            _redact_spark_remote(remote)
+            == "sc://spark-notebook:15002/;x-kbase-token=<redacted>"
+        )
+
+    def test_handles_missing_remote(self):
+        assert _redact_spark_remote(None) == "N/A"
 
 
 # =============================================================================
@@ -688,7 +841,7 @@ class TestGenerateSparkConf:
             use_spark_connect=True,
         )
 
-        assert "hive.metastore.uris" not in config
+        assert "spark.hadoop.hive.metastore.uris" not in config
 
     def test_with_tenant_name(self, test_settings):
         """Test configuration with tenant name."""
@@ -721,6 +874,10 @@ class TestGenerateSparkConf:
             mock_settings.MINIO_SECURE = False
             mock_settings.USER = "testuser"
             mock_settings.BERDL_HIVE_METASTORE_URI = AnyUrl("thrift://localhost:9083")
+            mock_settings.POLARIS_CATALOG_URI = None
+            mock_settings.POLARIS_CREDENTIAL = None
+            mock_settings.POLARIS_PERSONAL_CATALOG = None
+            mock_settings.POLARIS_TENANT_CATALOGS = None
 
             mock_get.return_value = mock_settings
 
@@ -874,6 +1031,33 @@ class TestGetSparkSession:
                     )
 
                     mock_set_pool.assert_not_called()
+
+    def test_skips_polaris_warmup_in_connect_mode(self, test_settings):
+        """Spark Connect sessions should not run eager catalog SQL during setup."""
+        mock_session = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.config.return_value = mock_builder
+        mock_builder.create.return_value = mock_session
+
+        with patch(
+            "src.delta_lake.setup_spark_session.SparkSession"
+        ) as mock_spark_class:
+            mock_spark_class.builder = mock_builder
+
+            with patch(
+                "src.delta_lake.setup_spark_session._clear_spark_env_for_mode_switch"
+            ):
+                with patch(
+                    "src.delta_lake.setup_spark_session._warm_polaris_catalogs"
+                ) as mock_warm:
+                    get_spark_session(
+                        app_name="TestSession",
+                        local=False,
+                        settings=test_settings,
+                        use_spark_connect=True,
+                    )
+
+                    mock_warm.assert_not_called()
 
     def test_uses_spark_conf_with_load_defaults_false(self, test_settings):
         """Test that SparkConf is created with loadDefaults=False."""

@@ -161,43 +161,44 @@ class TestCheckHiveMetastore:
 
 
 class TestHealthCheckEndpoint:
-    """Cover health_check overall-status logic (lines 130-135)."""
+    """Cover health_check overall-status logic.
 
-    @pytest.mark.asyncio
+    The route is sync ``def`` (so FastAPI runs it in the threadpool and
+    blocking HMS/Redis calls don't freeze the event loop), so these tests
+    call it directly without awaiting.
+    """
+
     @patch("src.routes.health._check_hive_metastore", return_value=True)
     @patch("src.routes.health._check_redis", return_value=True)
-    async def test_all_healthy(self, _mock_redis, _mock_hive):
-        """All components healthy ⇒ overall healthy (line 134-135)."""
-        resp = await health_check()
+    def test_all_healthy(self, _mock_redis, _mock_hive):
+        """All components healthy ⇒ overall healthy."""
+        resp = health_check()
 
         assert resp.status == "healthy"
         assert resp.message == "All components healthy"
         assert len(resp.components) == 2
 
-    @pytest.mark.asyncio
     @patch(
         "src.routes.health._check_hive_metastore",
         side_effect=ConnectionError("thrift down"),
     )
     @patch("src.routes.health._check_redis", return_value=True)
-    async def test_one_unhealthy(self, _mock_redis, _mock_hive):
-        """One unhealthy component ⇒ overall unhealthy (line 128-129)."""
-        resp = await health_check()
+    def test_one_unhealthy(self, _mock_redis, _mock_hive):
+        """One unhealthy component ⇒ overall unhealthy."""
+        resp = health_check()
 
         assert resp.status == "unhealthy"
         assert "1 component(s) unhealthy" in resp.message
 
-    @pytest.mark.asyncio
     @patch("src.routes.health._check_hive_metastore", return_value=True)
     @patch("src.routes.health._check_redis", return_value="warming up")
-    async def test_one_degraded(self, _mock_redis, _mock_hive):
-        """One degraded component ⇒ overall degraded (line 130-132)."""
-        resp = await health_check()
+    def test_one_degraded(self, _mock_redis, _mock_hive):
+        """One degraded component ⇒ overall degraded."""
+        resp = health_check()
 
         assert resp.status == "degraded"
         assert "1 component(s) degraded" in resp.message
 
-    @pytest.mark.asyncio
     @patch(
         "src.routes.health._check_hive_metastore",
         side_effect=RuntimeError("hive error"),
@@ -206,33 +207,29 @@ class TestHealthCheckEndpoint:
         "src.routes.health._check_redis",
         side_effect=RuntimeError("redis error"),
     )
-    async def test_all_unhealthy(self, _mock_redis, _mock_hive):
+    def test_all_unhealthy(self, _mock_redis, _mock_hive):
         """All components unhealthy."""
-        resp = await health_check()
+        resp = health_check()
 
         assert resp.status == "unhealthy"
         assert "2 component(s) unhealthy" in resp.message
 
-    @pytest.mark.asyncio
     @patch("src.routes.health._check_hive_metastore", return_value="slow")
     @patch("src.routes.health._check_redis", return_value="warming up")
-    async def test_multiple_degraded(self, _mock_redis, _mock_hive):
+    def test_multiple_degraded(self, _mock_redis, _mock_hive):
         """Multiple degraded components."""
-        resp = await health_check()
+        resp = health_check()
 
         assert resp.status == "degraded"
         assert "2 component(s) degraded" in resp.message
 
-    @pytest.mark.asyncio
     @patch(
         "src.routes.health._check_hive_metastore",
         side_effect=RuntimeError("hive error"),
     )
     @patch("src.routes.health._check_redis", return_value="degraded")
-    async def test_unhealthy_takes_precedence_over_degraded(
-        self, _mock_redis, _mock_hive
-    ):
+    def test_unhealthy_takes_precedence_over_degraded(self, _mock_redis, _mock_hive):
         """Unhealthy takes precedence over degraded."""
-        resp = await health_check()
+        resp = health_check()
 
         assert resp.status == "unhealthy"

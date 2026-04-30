@@ -279,36 +279,30 @@ def select_table_subprocess(
 
 def list_databases_subprocess(
     settings_dict: dict,
-    use_hms: bool = True,
-    filter_by_namespace: bool = False,
-    auth_token: str | None = None,
+    filter_by_namespace: bool = True,
     app_name: str = "mcp_list_dbs",
 ) -> list[str]:
     """
-    List databases in the Hive metastore (subprocess version).
+    List Iceberg + Hive databases (subprocess version).
 
     Args:
         settings_dict: Picklable dict of BERDLSettings values
-        use_hms: Whether to use Hive Metastore direct query
-        filter_by_namespace: Filter by user namespace
-        auth_token: Auth token for namespace filtering
+        filter_by_namespace: If True (default), restrict to databases owned by
+            the user or accessible via the user's tenant catalogs.
         app_name: Spark application name
 
     Returns:
-        List of database names
+        List of database identifiers (Iceberg ``catalog.namespace`` + Hive
+        flat names)
     """
     spark = None
     try:
         spark = _create_spark_session(settings_dict, app_name)
-        settings = _reconstruct_settings(settings_dict)
-
         result = data_store.get_databases(
             spark=spark,
-            use_hms=use_hms,
             return_json=False,
             filter_by_namespace=filter_by_namespace,
-            auth_token=auth_token,
-            settings=settings,
+            settings=settings_dict,
         )
         return list(result)
     finally:
@@ -319,16 +313,14 @@ def list_databases_subprocess(
 def list_tables_subprocess(
     settings_dict: dict,
     database: str,
-    use_hms: bool = True,
     app_name: str = "mcp_list_tables",
 ) -> list[str]:
     """
-    List tables in a database (subprocess version).
+    List tables in an Iceberg namespace (subprocess version).
 
     Args:
         settings_dict: Picklable dict of BERDLSettings values
-        database: Database name
-        use_hms: Whether to use Hive Metastore direct query
+        database: Namespace in catalog.namespace format
         app_name: Spark application name
 
     Returns:
@@ -337,14 +329,10 @@ def list_tables_subprocess(
     spark = None
     try:
         spark = _create_spark_session(settings_dict, app_name)
-        settings = _reconstruct_settings(settings_dict)
-
         result = data_store.get_tables(
             database=database,
             spark=spark,
-            use_hms=use_hms,
             return_json=False,
-            settings=settings,
         )
         return list(result)
     finally:
@@ -359,11 +347,11 @@ def get_table_schema_subprocess(
     app_name: str = "mcp_schema",
 ) -> list[str]:
     """
-    Get table schema (column names) (subprocess version).
+    Get table schema (column names) from Iceberg catalog (subprocess version).
 
     Args:
         settings_dict: Picklable dict of BERDLSettings values
-        database: Database name
+        database: Namespace in catalog.namespace format
         table: Table name
         app_name: Spark application name
 
@@ -388,38 +376,33 @@ def get_table_schema_subprocess(
 def get_db_structure_subprocess(
     settings_dict: dict,
     with_schema: bool = False,
-    use_hms: bool = True,
     filter_by_namespace: bool = False,
     auth_token: str | None = None,
     app_name: str = "mcp_structure",
 ) -> dict[str, Any]:
     """
-    Get database structure (subprocess version).
+    Get Iceberg database structure (subprocess version).
 
     Args:
         settings_dict: Picklable dict of BERDLSettings values
         with_schema: Whether to include table schemas
-        use_hms: Whether to use Hive Metastore direct query
         filter_by_namespace: Whether to filter databases by user namespace
         auth_token: KBase auth token (required if filter_by_namespace is True)
         app_name: Spark application name
 
     Returns:
-        Dict mapping database names to table lists or schema dicts
+        Dict mapping catalog.namespace to table lists or schema dicts
     """
     spark = None
     try:
         spark = _create_spark_session(settings_dict, app_name)
-        settings = _reconstruct_settings(settings_dict)
-
         result = data_store.get_db_structure(
             spark=spark,
             with_schema=with_schema,
-            use_hms=use_hms,
             return_json=False,
             filter_by_namespace=filter_by_namespace,
             auth_token=auth_token,
-            settings=settings,
+            settings=settings_dict,
         )
         return dict(result)
     finally:

@@ -1,5 +1,5 @@
 """
-API routes for Delta Lake operations.
+API routes for Delta Lake / Iceberg operations.
 
 Routes support full concurrency:
 - Spark Connect mode: Direct SparkSession usage
@@ -95,8 +95,8 @@ def _make_trino_ctx(request: Request) -> Generator[TrinoContext, None, None]:
     "/databases/list",
     response_model=DatabaseListResponse,
     status_code=status.HTTP_200_OK,
-    summary="List all databases in the Hive metastore",
-    description="Lists all databases available in the Hive metastore, optionally using PostgreSQL for faster retrieval and filtered by user namespace.",
+    summary="List all Iceberg namespaces",
+    description="Lists all accessible Iceberg namespaces across all catalogs. Returns namespaces in catalog.namespace format.",
     operation_id="list_databases",
 )
 def list_databases(
@@ -119,17 +119,12 @@ def list_databases(
         with _make_trino_ctx(http_request) as trino_ctx:
             databases = trino_data_store.get_databases_trino(
                 conn=trino_ctx.connection,
-                use_hms=body.use_hms,
-                filter_by_namespace=body.filter_by_namespace,
-                auth_token=auth_token,
             )
     elif ctx.is_standalone_subprocess:
         databases = run_in_spark_process(
             list_databases_subprocess,
             ctx.settings_dict,
-            use_hms=body.use_hms,
             filter_by_namespace=body.filter_by_namespace,
-            auth_token=auth_token,
             app_name=ctx.app_name,
             operation_name="list_databases",
         )
@@ -138,10 +133,9 @@ def list_databases(
             list[str],
             data_store.get_databases(
                 spark=ctx.spark,
-                use_hms=body.use_hms,
                 return_json=False,
                 filter_by_namespace=body.filter_by_namespace,
-                auth_token=auth_token,
+                settings=ctx.settings_dict,
             ),
         )
 
@@ -152,8 +146,8 @@ def list_databases(
     "/databases/tables/list",
     response_model=TableListResponse,
     status_code=status.HTTP_200_OK,
-    summary="List tables in a database",
-    description="Lists all tables in a specific database, optionally using PostgreSQL for faster retrieval.",
+    summary="List tables in an Iceberg namespace",
+    description="Lists all tables in a specific Iceberg namespace (catalog.namespace format).",
     operation_id="list_database_tables",
 )
 def list_database_tables(
@@ -169,27 +163,22 @@ def list_database_tables(
             tables = trino_data_store.get_tables_trino(
                 conn=trino_ctx.connection,
                 database=request.database,
-                use_hms=request.use_hms,
             )
     elif ctx.is_standalone_subprocess:
         tables = run_in_spark_process(
             list_tables_subprocess,
             ctx.settings_dict,
             database=request.database,
-            use_hms=request.use_hms,
             app_name=ctx.app_name,
             operation_name="list_tables",
         )
     else:
-        settings = get_settings()
         tables = cast(
             list[str],
             data_store.get_tables(
                 database=request.database,
                 spark=ctx.spark,
-                use_hms=request.use_hms,
                 return_json=False,
-                settings=settings,
             ),
         )
     return TableListResponse(tables=tables)
@@ -200,7 +189,7 @@ def list_database_tables(
     response_model=TableSchemaResponse,
     status_code=status.HTTP_200_OK,
     summary="Get table schema",
-    description="Gets the schema (column names) of a specific table in a database.",
+    description="Gets the schema (column names) of a specific table in an Iceberg namespace.",
     operation_id="get_table_schema",
 )
 def get_table_schema(
@@ -244,8 +233,8 @@ def get_table_schema(
     "/databases/structure",
     response_model=DatabaseStructureResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get database structure",
-    description="Gets the complete structure of all databases, optionally including table schemas.",
+    summary="Get Iceberg database structure",
+    description="Gets the complete structure of all Iceberg namespaces, optionally including table schemas.",
     operation_id="get_database_structure",
 )
 def get_database_structure(
@@ -269,7 +258,6 @@ def get_database_structure(
             structure = trino_data_store.get_db_structure_trino(
                 conn=trino_ctx.connection,
                 with_schema=request.with_schema,
-                use_hms=request.use_hms,
                 filter_by_namespace=request.filter_by_namespace,
                 auth_token=auth_token,
             )
@@ -278,24 +266,21 @@ def get_database_structure(
             get_db_structure_subprocess,
             ctx.settings_dict,
             with_schema=request.with_schema,
-            use_hms=request.use_hms,
             filter_by_namespace=request.filter_by_namespace,
             auth_token=auth_token,
             app_name=ctx.app_name,
             operation_name="get_db_structure",
         )
     else:
-        settings = get_settings()
         structure = cast(
             dict[str, list[str] | dict[str, list[str]]],
             data_store.get_db_structure(
                 spark=ctx.spark,
                 with_schema=request.with_schema,
-                use_hms=request.use_hms,
                 return_json=False,
                 filter_by_namespace=request.filter_by_namespace,
                 auth_token=auth_token,
-                settings=settings,
+                settings=ctx.settings_dict,
             ),
         )
     return DatabaseStructureResponse(structure=structure)

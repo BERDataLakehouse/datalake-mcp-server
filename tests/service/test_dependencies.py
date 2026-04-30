@@ -1222,6 +1222,20 @@ class TestSparkContextDataclass:
 class TestGetSparkContext:
     """Tests for the get_spark_context dependency generator."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_sc_health(self):
+        """Each test starts with a clean Spark Connect health tracker.
+
+        ``_base_patches`` always resolves the user to "testuser", so any test
+        that marks SC unhealthy (probe-failure tests) would leak state into
+        every subsequent test in this class without this reset.
+        """
+        from src.service import sc_health
+
+        sc_health._unhealthy_until.clear()
+        yield
+        sc_health._unhealthy_until.clear()
+
     def _base_patches(self):
         """Convenience: return a dict of the common patches for get_spark_context."""
         return {
@@ -1330,14 +1344,41 @@ class TestGetSparkContext:
                     except StopIteration:
                         pass
 
-    # ---- Connect: session validation fails → fall back ----
+    # ---- Connect: SQL probe fails → fail fast (no Standalone fallback) ----
+    # Note: _base_patches resolves the user to "testuser" regardless of the
+    # value passed to mock_request; the autouse fixture above clears
+    # sc_health state so these tests don't leak across each other.
 
-    def test_fallback_when_session_validation_fails(self, mock_request, mock_settings):
-        """Connect session created but spark.version call fails → Standalone fallback."""
+    def test_failed_health_probe_raises_sc_unavailable(
+        self, mock_request, mock_settings
+    ):
+        """Connect session created but ``spark.version`` probe fails →
+        ``SparkConnectUnavailableError``.
+
+        This is the wedge mode we observed in stage: gRPC channel is up,
+        session creation succeeds, but the session is otherwise unusable
+        (e.g. driver wedged on a startup task, gRPC half-broken). We must
+        NOT silently fall back to Standalone — instead surface a clear
+        actionable error so the user knows to restart their notebook pod.
+
+        The probe was changed from ``spark.sql("SELECT 1").collect()`` to
+        ``spark.version`` to avoid PySpark Spark Connect's reattachable
+        streaming protocol, which doesn't survive being driven from a
+        thread other than the one that created the session — observed
+        in stage producing ``"abandoned and expired"`` operations on the
+        Spark Connect server side and false-positive probe failures here.
+        """
+        from src.service import sc_health
+        from src.service.exceptions import SparkConnectUnavailableError
+
         req = mock_request(user="testuser")
         mock_spark = MagicMock()
-        type(mock_spark).version = property(
-            lambda self: (_ for _ in ()).throw(Exception("channel closed"))
+        # spark.version raises → simulates wedged session.
+        # Note: ``version`` is a property, hence ``PropertyMock``.
+        from unittest.mock import PropertyMock
+
+        type(mock_spark).version = PropertyMock(
+            side_effect=Exception("driver deadlocked")
         )
 
         ps = self._base_patches()
@@ -1351,14 +1392,85 @@ class TestGetSparkContext:
                     return_value=mock_spark,
                 ):
                     gen = get_spark_context(req, mock_settings)
-                    ctx = next(gen)
-
-                    assert ctx.is_standalone_subprocess is True
-
-                    try:
+                    with pytest.raises(SparkConnectUnavailableError):
                         next(gen)
-                    except StopIteration:
-                        pass
+
+        # User should now be marked unhealthy so subsequent requests short-circuit.
+        assert sc_health.is_unhealthy("testuser") is True
+
+    def test_session_create_timeout_raises_sc_unavailable(
+        self, mock_request, mock_settings
+    ):
+        """Session creation that exceeds ``_SC_CREATE_TIMEOUT_SECONDS``
+        must raise ``SparkConnectUnavailableError`` (not hang for the full
+        request budget) and mark the user unhealthy.
+
+        Regression for the 2026-04-30 stage incident:
+        ``SparkSession.builder.remote(...).create()`` has no built-in
+        deadline, so a wedged Spark Connect server (e.g. cached gRPC channel
+        pinned to a stale pod IP after a notebook restart) blocked every MCP
+        call from the affected user for the full 115 s request budget. The
+        timeout converts that into a sub-15 s 503 with an actionable message,
+        and the unhealthy mark short-circuits subsequent requests on the
+        fast path.
+        """
+        from src.service import sc_health
+        from src.service.exceptions import (
+            SparkConnectUnavailableError,
+            SparkTimeoutError,
+        )
+
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies.run_with_timeout",
+                    side_effect=SparkTimeoutError(
+                        operation="sc_create_session[testuser]",
+                        timeout=15.0,
+                    ),
+                ) as mock_run_with_timeout:
+                    gen = get_spark_context(req, mock_settings)
+                    with pytest.raises(SparkConnectUnavailableError):
+                        next(gen)
+
+                    # The bound was actually applied (didn't hang).
+                    mock_run_with_timeout.assert_called_once()
+
+        # User should now be marked unhealthy so subsequent requests
+        # short-circuit on the fast path before any session creation attempt.
+        assert sc_health.is_unhealthy("testuser") is True
+
+    def test_unhealthy_user_short_circuits_before_session_creation(
+        self, mock_request, mock_settings
+    ):
+        """Pre-marked unhealthy user gets immediate SparkConnectUnavailableError."""
+        from src.service import sc_health
+        from src.service.exceptions import SparkConnectUnavailableError
+
+        sc_health.mark_unhealthy("testuser")
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies._get_spark_session_with_retry",
+                ) as mock_create:
+                    gen = get_spark_context(req, mock_settings)
+                    with pytest.raises(SparkConnectUnavailableError):
+                        next(gen)
+
+                    # Critical: we must NOT have attempted to create a session.
+                    mock_create.assert_not_called()
 
     # ---- Credential errors ----
 

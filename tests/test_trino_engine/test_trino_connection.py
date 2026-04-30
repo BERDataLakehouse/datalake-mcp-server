@@ -18,10 +18,14 @@ import pytest
 from src.service.exceptions import TrinoConnectionError
 from src.trino_engine.trino_connection import (
     ALLOWED_CONNECTORS,
+    _build_iceberg_catalog_properties,
     _build_catalog_properties,
     _catalog_exists,
     _create_dynamic_catalog,
     _escape_sql_string,
+    _get_personal_catalog_alias,
+    _get_tenant_catalog_alias,
+    _iter_tenant_catalogs,
     _sanitize_identifier,
     _validate_connector,
     create_trino_connection,
@@ -108,6 +112,54 @@ class TestBuildCatalogProperties:
             secret_key="sk",
         )
         assert props["s3.endpoint"] == "http://minio:9000"
+
+
+# =============================================================================
+# Polaris Catalog Helper Tests
+# =============================================================================
+
+
+class TestPolarisCatalogHelpers:
+    """Tests for Polaris Iceberg catalog helpers."""
+
+    def test_personal_catalog_alias(self):
+        assert _get_personal_catalog_alias("user_testuser") == "testuser"
+        assert _get_personal_catalog_alias("Test.User") == "test_user"
+        assert _get_personal_catalog_alias(None) is None
+
+    def test_tenant_catalog_alias(self):
+        assert _get_tenant_catalog_alias("tenant_globalusers") == "globalusers"
+        assert _get_tenant_catalog_alias("tenant_research-team") == "research_team"
+
+    def test_iter_tenant_catalogs(self):
+        assert _iter_tenant_catalogs("tenant_a, tenant_b,,") == [
+            "tenant_a",
+            "tenant_b",
+        ]
+        assert _iter_tenant_catalogs(None) == []
+
+    def test_build_iceberg_catalog_properties(self):
+        props = _build_iceberg_catalog_properties(
+            polaris_catalog_uri="http://polaris:8181/api/catalog",
+            polaris_credential="cid:secret",
+            warehouse="user_testuser",
+            hive_metastore_uri="thrift://hms:9083",
+            minio_endpoint_url="minio:9000",
+            minio_secure=False,
+            access_key="ak",
+            secret_key="sk",
+        )
+
+        assert props["iceberg.catalog.type"] == "rest"
+        assert props["iceberg.rest-catalog.uri"] == "http://polaris:8181/api/catalog"
+        assert props["iceberg.rest-catalog.warehouse"] == "user_testuser"
+        assert props["iceberg.rest-catalog.oauth2.credential"] == "cid:secret"
+        assert (
+            props["iceberg.rest-catalog.oauth2.server-uri"]
+            == "http://polaris:8181/api/catalog/v1/oauth/tokens"
+        )
+        assert props["s3.endpoint"] == "http://minio:9000"
+        assert "hive.metastore.uri" not in props
 
 
 # =============================================================================
@@ -288,3 +340,45 @@ class TestCreateTrinoConnection:
                 minio_endpoint_url="minio:9000",
                 minio_secure=False,
             )
+
+    @patch("src.trino_engine.trino_connection.trino.dbapi.connect")
+    def test_creates_polaris_catalogs_when_configured(self, mock_connect):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.side_effect = [
+            [("system",)],  # u_test_user missing
+            [],  # CREATE u_test_user
+            [("system",), ("u_test_user",)],  # test_user missing
+            [],  # CREATE test_user
+            [("system",), ("u_test_user",), ("test_user",)],  # research missing
+            [],  # CREATE research
+        ]
+        mock_conn.cursor.return_value = mock_cursor
+        mock_conn._client_session = MagicMock()
+        mock_connect.return_value = mock_conn
+
+        create_trino_connection(
+            username="test_user",
+            auth_token="tok",
+            access_key="ak",
+            secret_key="sk",
+            trino_host="trino",
+            trino_port=8080,
+            hive_metastore_uri="thrift://hms:9083",
+            minio_endpoint_url="minio:9000",
+            minio_secure=False,
+            polaris_catalog_uri="http://polaris:8181/api/catalog",
+            polaris_credential="cid:secret",
+            polaris_personal_catalog="user_test_user",
+            polaris_tenant_catalogs="tenant_research",
+        )
+
+        create_sql = "\n".join(
+            call.args[0]
+            for call in mock_cursor.execute.call_args_list
+            if call.args[0].startswith("CREATE CATALOG")
+        )
+        assert '"u_test_user" USING delta_lake' in create_sql
+        assert '"test_user" USING iceberg' in create_sql
+        assert '"research" USING iceberg' in create_sql
+        assert "iceberg.rest-catalog.oauth2.credential" in create_sql
