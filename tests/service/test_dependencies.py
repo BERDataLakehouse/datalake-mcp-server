@@ -1383,6 +1383,54 @@ class TestGetSparkContext:
         # User should now be marked unhealthy so subsequent requests short-circuit.
         assert sc_health.is_unhealthy("testuser") is True
 
+    def test_session_create_timeout_raises_sc_unavailable(
+        self, mock_request, mock_settings
+    ):
+        """Session creation that exceeds ``_SC_CREATE_TIMEOUT_SECONDS``
+        must raise ``SparkConnectUnavailableError`` (not hang for the full
+        request budget) and mark the user unhealthy.
+
+        Regression for the 2026-04-30 stage incident:
+        ``SparkSession.builder.remote(...).create()`` has no built-in
+        deadline, so a wedged Spark Connect server (e.g. cached gRPC channel
+        pinned to a stale pod IP after a notebook restart) blocked every MCP
+        call from the affected user for the full 115 s request budget. The
+        timeout converts that into a sub-15 s 503 with an actionable message,
+        and the unhealthy mark short-circuits subsequent requests on the
+        fast path.
+        """
+        from src.service import sc_health
+        from src.service.exceptions import (
+            SparkConnectUnavailableError,
+            SparkTimeoutError,
+        )
+
+        req = mock_request(user="testuser")
+
+        ps = self._base_patches()
+        with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
+            with patch(
+                "src.service.dependencies.is_spark_connect_reachable",
+                return_value=True,
+            ):
+                with patch(
+                    "src.service.dependencies.run_with_timeout",
+                    side_effect=SparkTimeoutError(
+                        operation="sc_create_session[testuser]",
+                        timeout=15.0,
+                    ),
+                ) as mock_run_with_timeout:
+                    gen = get_spark_context(req, mock_settings)
+                    with pytest.raises(SparkConnectUnavailableError):
+                        next(gen)
+
+                    # The bound was actually applied (didn't hang).
+                    mock_run_with_timeout.assert_called_once()
+
+        # User should now be marked unhealthy so subsequent requests
+        # short-circuit on the fast path before any session creation attempt.
+        assert sc_health.is_unhealthy("testuser") is True
+
     def test_unhealthy_user_short_circuits_before_session_creation(
         self, mock_request, mock_settings
     ):

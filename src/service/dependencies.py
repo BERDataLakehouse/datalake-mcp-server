@@ -32,6 +32,7 @@ from src.service import app_state, sc_health
 from src.service.exceptions import (
     MissingTokenError,
     SparkConnectUnavailableError,
+    SparkTimeoutError,
     TrinoConnectionError,
 )
 from src.service.http_bearer import KBaseHTTPBearer
@@ -46,6 +47,20 @@ from src.trino_engine.trino_connection import create_trino_connection
 # generous headroom while still being short enough that a hung user notebook
 # is detected long before a 115 s request-timeout budget would expire.
 _SC_PROBE_TIMEOUT_SECONDS = float(os.getenv("SC_PROBE_TIMEOUT_SECONDS", "5"))
+
+# Maximum time we'll wait for ``SparkSession.builder.remote(...).create()`` to
+# complete. Companion bound to ``_SC_PROBE_TIMEOUT_SECONDS``: the SQL probe
+# catches wedged JVMs that respond to ``create()`` but hang on actual SQL;
+# this bound catches wedged Spark Connect servers that hang on ``create()``
+# itself — observed in stage when the user's notebook pod was reachable at
+# the gRPC transport layer (channel ready) but the SC server inside it had a
+# stale client-side gRPC channel pinned to a pod IP that no longer existed
+# after a notebook restart. Without this bound the call hangs for the full
+# FastAPI request-timeout budget (~115 s) and every subsequent call from the
+# same user blocks the same way until the MCP pod is restarted.
+#
+# 15 s is generous: a healthy session creation is < 500 ms even under load.
+_SC_CREATE_TIMEOUT_SECONDS = float(os.getenv("SC_CREATE_TIMEOUT_SECONDS", "15"))
 
 # Initialize the KBase auth dependency for use in routes
 auth = KBaseHTTPBearer()
@@ -697,16 +712,48 @@ def get_spark_context(
             )
 
             # Use retry wrapper to handle INVALID_HANDLE.SESSION_CLOSED errors
-            # that occur when the Spark Connect server has restarted
-            spark = _get_spark_session_with_retry(
-                app_name=app_name,
-                settings=user_settings,
-                use_spark_connect=True,
-                max_retries=2,
+            # that occur when the Spark Connect server has restarted.
+            #
+            # Bound the call with ``_SC_CREATE_TIMEOUT_SECONDS``:
+            # ``SparkSession.builder.remote(...).create()`` itself has no
+            # deadline, and a Spark Connect server with a stale gRPC channel
+            # (e.g. after a notebook pod restart) can hang here for the full
+            # request-timeout budget. ``SparkTimeoutError`` is handled below
+            # the same way as a SQL probe failure: mark the user unhealthy
+            # and surface a clean 503 — a silent fallback to the standalone
+            # subprocess pool would hide the real problem and waste capacity.
+            spark = run_with_timeout(
+                lambda: _get_spark_session_with_retry(
+                    app_name=app_name,
+                    settings=user_settings,
+                    use_spark_connect=True,
+                    max_retries=2,
+                ),
+                timeout_seconds=_SC_CREATE_TIMEOUT_SECONDS,
+                operation_name=f"sc_create_session[{username}]",
             )
 
             logger.info(f"✅ Connected via Spark Connect for user {username}")
 
+        except SparkTimeoutError:
+            # Wedged ``create()`` — same operator-actionable signature as a
+            # failed SQL probe. Mark unhealthy + raise so subsequent requests
+            # short-circuit on the fast path above, and so this request fails
+            # with a clear, actionable message instead of degrading silently.
+            logger.warning(
+                f"Spark Connect session creation timed out for {username} "
+                f"after {_SC_CREATE_TIMEOUT_SECONDS}s "
+                f"(server reachable at gRPC layer but did not respond to "
+                f"create()). Marking SC unhealthy for "
+                f"{sc_health.SC_UNHEALTHY_TTL}s."
+            )
+            sc_health.mark_unhealthy(username)
+            raise SparkConnectUnavailableError(
+                f"Spark Connect server for user '{username}' did not respond "
+                f"to a session-create RPC within "
+                f"{int(_SC_CREATE_TIMEOUT_SECONDS)}s. Restart your notebook "
+                f"pod to recover."
+            )
         except Exception as e:
             # Spark Connect session creation failed despite health check passing
             # This can happen due to race conditions or transient network issues
