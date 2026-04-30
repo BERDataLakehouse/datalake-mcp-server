@@ -20,7 +20,8 @@ from src.service.exceptions import (
     SparkQueryError,
     SparkTimeoutError,
 )
-from src.service.timeouts import run_with_timeout, SPARK_CONNECT_QUERY_TIMEOUT
+from src.service.timeouts import SPARK_CONNECT_QUERY_TIMEOUT
+from src.service.timeouts import run_with_timeout as _pool_run_with_timeout  # noqa: F401
 from src.service.models import (
     AggregationSpec,
     ColumnSpec,
@@ -33,6 +34,39 @@ from src.service.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def run_with_timeout(func, *, timeout_seconds=None, operation_name=None):
+    """In-process replacement for ``src.service.timeouts.run_with_timeout``.
+
+    The original ``run_with_timeout`` submits the callable to a
+    ``ThreadPoolExecutor`` to enforce a timeout. This module's Spark
+    Connect callers cannot tolerate that thread switch: PySpark's
+    Spark Connect client uses a **reattachable streaming** protocol
+    whose machinery is bound to the thread that created the session.
+    When ``collect()`` runs on a different thread than ``builder.create()``,
+    the server processes the query in <100 ms but the client never reads
+    the response — the operation is logged as ``"abandoned and expired"``
+    on the Spark Connect server ~5 minutes later, and the FastAPI
+    request blocks the full ``REQUEST_TIMEOUT_SECONDS`` window in the
+    meantime. We observed this in stage and prod with high
+    reproducibility under sustained load (load testing produced 96
+    abandoned operations in a single notebook pod's Spark Connect log
+    over a few hours).
+
+    Calling inline (in the request handler thread, where the session
+    was created via ``Depends(get_spark_context)``) restores reattach
+    correctness. Operation-level timeout is gone, but it was never
+    actually firing in practice — the FastAPI request middleware
+    (``REQUEST_TIMEOUT_SECONDS``) caps total request time, and the
+    Standalone path enforces its own subprocess-level timeout via
+    ``src.service.spark_session_pool.run_in_spark_process``.
+
+    The ``timeout_seconds`` and ``operation_name`` keyword arguments
+    are accepted (and ignored) so the call sites and existing test
+    fixtures continue to work without modification.
+    """
+    return func()
 
 # Row limits to prevent OOM and ensure service stability
 MAX_SAMPLE_ROWS = 100
