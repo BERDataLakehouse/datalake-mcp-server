@@ -1349,7 +1349,9 @@ class TestGetSparkContext:
     # value passed to mock_request; the autouse fixture above clears
     # sc_health state so these tests don't leak across each other.
 
-    def test_failed_health_probe_raises_sc_unavailable(self, mock_request, mock_settings):
+    def test_failed_health_probe_raises_sc_unavailable(
+        self, mock_request, mock_settings
+    ):
         """Connect session created but ``spark.version`` probe fails →
         ``SparkConnectUnavailableError``.
 
