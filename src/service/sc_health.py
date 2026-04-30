@@ -2,17 +2,19 @@
 Per-user Spark Connect health tracking.
 
 When a user's Spark Connect server (their notebook pod) is reachable at the
-gRPC level but its JVM driver is wedged at the SQL level, every subsequent
-request from that user hangs the full request-timeout window (115 s). Across
-the cells of a notebook this looks like "the whole MCP service is broken"
-even though every other user is fine.
+gRPC level but its JVM driver is wedged or its session is otherwise unusable,
+every subsequent request from that user can hang the full request-timeout
+window (115 s). Across the cells of a notebook this looks like "the whole
+MCP service is broken" even though every other user is fine.
 
 This module records a per-user "broken-until" deadline.
-``get_spark_context`` runs a cheap ``SELECT 1`` probe after session creation;
-on probe failure it marks the user unhealthy for ``SC_UNHEALTHY_TTL`` seconds
-and raises an immediate error. Subsequent requests from that user during the
-window short-circuit on this mark — converting a 115 s timeout into a
-sub-second 503 with a clear message: restart the notebook pod.
+``get_spark_context`` runs a cheap ``spark.version`` probe after session
+creation; on probe failure it marks the user unhealthy for
+``SC_UNHEALTHY_TTL`` seconds and raises an immediate error. Subsequent
+requests from that user during the window short-circuit on this mark —
+converting a 115 s timeout into a sub-second 503 with a clear message:
+restart the notebook pod. The mark is also set by a session-create
+timeout (see ``_SC_CREATE_TIMEOUT_SECONDS``).
 """
 
 import os

@@ -42,10 +42,11 @@ from src.service.timeouts import run_with_timeout
 from src.settings import BERDLSettings, get_settings
 from src.trino_engine.trino_connection import create_trino_connection
 
-# How long to wait for a SQL probe (`SELECT 1`) when validating a freshly
-# created Spark Connect session. Healthy SCs respond in < 100 ms; 5 s gives
-# generous headroom while still being short enough that a hung user notebook
-# is detected long before a 115 s request-timeout budget would expire.
+# How long to wait for the post-create health probe (``spark.version``)
+# when validating a freshly created Spark Connect session. Healthy SCs
+# respond in < 100 ms; 5 s gives generous headroom while still being short
+# enough that a hung user notebook is detected long before a 115 s
+# request-timeout budget would expire.
 _SC_PROBE_TIMEOUT_SECONDS = float(os.getenv("SC_PROBE_TIMEOUT_SECONDS", "5"))
 
 # Maximum time we'll wait for ``SparkSession.builder.remote(...).create()`` to
@@ -767,32 +768,48 @@ def get_spark_context(
             )
             spark_connect_failed = True
 
-        # SQL PROBE: separate from session creation. If session creation
-        # succeeded but the JVM driver is wedged at the SQL level (the
-        # actual failure mode we've observed in stage), spark.sql(...) will
-        # hang for the full request-timeout budget — and so will every
-        # subsequent request from this user. Run a cheap `SELECT 1` with a
-        # tight bound; on failure mark the user unhealthy and fail fast
-        # with a clear actionable error instead of silently falling back to
-        # the standalone subprocess pool (which would hide the real problem
-        # AND eat shared standalone capacity).
+        # HEALTH PROBE: separate from session creation. Catches the case
+        # where ``create()`` returned but the session is otherwise unusable
+        # (gRPC channel half-broken, driver wedged on a startup task, etc.).
+        #
+        # We probe with ``spark.version`` rather than ``SELECT 1`` because:
+        #
+        # * ``spark.version`` is a **unary** ``AnalyzePlan`` gRPC call —
+        #   request goes out, single response comes back, done.
+        # * ``SELECT 1`` is an ``ExecutePlan`` call that uses Spark Connect's
+        #   **reattachable streaming** protocol by default. PySpark's reattach
+        #   machinery is bound to the thread that created the session, and
+        #   we observed in stage that when the probe runs in a *different*
+        #   thread (which ``run_with_timeout`` does — it submits to a
+        #   ``ThreadPoolExecutor``), the server sends responses but the
+        #   client never reads them. Those operations show up as
+        #   ``"abandoned and expired"`` in the Spark Connect JVM log
+        #   ~5 minutes later, even though the SQL completed in <100 ms.
+        #   Result: every probe times out at ``_SC_PROBE_TIMEOUT_SECONDS``,
+        #   ``sc_health`` marks the user unhealthy, and they cannot use MCP
+        #   even though their Spark cluster is perfectly fine.
+        #
+        # ``spark.version`` validates the same things we care about for the
+        # probe (gRPC channel works, server can respond, driver thread is
+        # alive) without going through the reattach machinery.
         if spark is not None and not spark_connect_failed:
             try:
                 run_with_timeout(
-                    lambda: spark.sql("SELECT 1").collect(),
+                    lambda: spark.version,
                     timeout_seconds=_SC_PROBE_TIMEOUT_SECONDS,
                     operation_name=f"sc_health_probe[{username}]",
                 )
             except Exception as probe_error:
                 logger.warning(
-                    f"Spark Connect SQL probe failed for {username}: "
-                    f"{type(probe_error).__name__}: {probe_error}. Marking SC "
-                    f"unhealthy for {sc_health.SC_UNHEALTHY_TTL}s."
+                    f"Spark Connect health probe (spark.version) failed for "
+                    f"{username}: {type(probe_error).__name__}: "
+                    f"{probe_error}. Marking SC unhealthy for "
+                    f"{sc_health.SC_UNHEALTHY_TTL}s."
                 )
                 sc_health.mark_unhealthy(username)
                 raise SparkConnectUnavailableError(
                     f"Spark Connect server for user '{username}' accepted a "
-                    f"session but did not respond to a SELECT 1 probe within "
+                    f"session but did not respond to spark.version within "
                     f"{int(_SC_PROBE_TIMEOUT_SECONDS)}s. Restart your "
                     f"notebook pod to recover."
                 )

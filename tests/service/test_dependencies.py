@@ -1349,22 +1349,35 @@ class TestGetSparkContext:
     # value passed to mock_request; the autouse fixture above clears
     # sc_health state so these tests don't leak across each other.
 
-    def test_failed_sql_probe_raises_sc_unavailable(self, mock_request, mock_settings):
-        """Connect session created but SELECT 1 probe fails → SparkConnectUnavailableError.
+    def test_failed_health_probe_raises_sc_unavailable(self, mock_request, mock_settings):
+        """Connect session created but ``spark.version`` probe fails →
+        ``SparkConnectUnavailableError``.
 
         This is the wedge mode we observed in stage: gRPC channel is up,
-        session creation succeeds, but the JVM driver in the user's notebook
-        pod is deadlocked at the SQL execution layer. We must NOT silently
-        fall back to Standalone — instead surface a clear actionable error
-        so the user knows to restart their notebook pod.
+        session creation succeeds, but the session is otherwise unusable
+        (e.g. driver wedged on a startup task, gRPC half-broken). We must
+        NOT silently fall back to Standalone — instead surface a clear
+        actionable error so the user knows to restart their notebook pod.
+
+        The probe was changed from ``spark.sql("SELECT 1").collect()`` to
+        ``spark.version`` to avoid PySpark Spark Connect's reattachable
+        streaming protocol, which doesn't survive being driven from a
+        thread other than the one that created the session — observed
+        in stage producing ``"abandoned and expired"`` operations on the
+        Spark Connect server side and false-positive probe failures here.
         """
         from src.service import sc_health
         from src.service.exceptions import SparkConnectUnavailableError
 
         req = mock_request(user="testuser")
         mock_spark = MagicMock()
-        # spark.sql("SELECT 1").collect() raises → simulates wedged SQL layer.
-        mock_spark.sql.return_value.collect.side_effect = Exception("driver deadlocked")
+        # spark.version raises → simulates wedged session.
+        # Note: ``version`` is a property, hence ``PropertyMock``.
+        from unittest.mock import PropertyMock
+
+        type(mock_spark).version = PropertyMock(
+            side_effect=Exception("driver deadlocked")
+        )
 
         ps = self._base_patches()
         with ps["get_user"], ps["get_token"], ps["creds"], ps["url"]:
